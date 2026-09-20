@@ -1,0 +1,269 @@
+/**
+ * Chromium Match Pattern Engine
+ * Compiles <scheme>://<host><path> and <all_urls> into RegExp
+ * supporting wildcard subdomains, path wildcards, IPv6 literal hosts,
+ * and restricted URL rejection.
+ */
+
+const RESTRICTED_SCHEMES = [
+  'chrome:',
+  'chrome-extension:',
+  'chrome-untrusted:',
+  'edge:',
+  'devtools:',
+  'about:',
+  'view-source:',
+  'javascript:',
+  'data:',
+  'blob:'
+];
+
+/**
+ * Checks if a target URL is restricted by Chromium security policies.
+ * Extensions cannot inject scripts into internal or web store pages.
+ */
+export function isRestrictedUrl(url: string): boolean {
+  if (!url || typeof url !== 'string') return true;
+  try {
+    const parsed = new URL(url);
+    if (RESTRICTED_SCHEMES.includes(parsed.protocol)) {
+      return true;
+    }
+    // Block Chrome Web Store
+    if (
+      parsed.hostname === 'chromewebstore.google.com' ||
+      (parsed.hostname === 'chrome.google.com' && parsed.pathname.startsWith('/webstore'))
+    ) {
+      return true;
+    }
+    return false;
+  } catch {
+    // If URL parsing fails, check raw string prefix
+    const lower = url.toLowerCase().trim();
+    for (const scheme of RESTRICTED_SCHEMES) {
+      if (lower.startsWith(scheme)) return true;
+    }
+    return true; // Malformed URLs are restricted
+  }
+}
+
+/**
+ * Normalizes URL string for consistent pattern matching.
+ * Resolves root paths (e.g. https://example.com -> https://example.com/)
+ */
+export function normalizeUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.href;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Compiles a Chromium match pattern into a RegExp.
+ * Throws an Error if the pattern violates Chromium match pattern syntax.
+ */
+export function compileMatchPattern(pattern: string): RegExp {
+  if (typeof pattern !== 'string') {
+    throw new Error('Match pattern must be a string');
+  }
+
+  const trimmed = pattern.trim();
+
+  if (trimmed === '<all_urls>') {
+    return /^(?:https?|file):\/\/.+$/;
+  }
+
+  // Strict structural pattern: <scheme>://<host><path>
+  // In Manifest V3 userscripts, valid schemes are *, http, https, file (ftp is disallowed)
+  const match = trimmed.match(/^(\*|https?|file):\/\/([^\/]*?)(\/.*)$/);
+  if (!match) {
+    throw new Error(
+      `Invalid match pattern syntax: "${pattern}". Expected "<scheme>://<host><path>" or "<all_urls>"`
+    );
+  }
+
+  const [, scheme, rawHostWithPort, path] = match;
+
+  // 1. Scheme compilation
+  let schemeRegex = '';
+  if (scheme === '*') {
+    // Wildcard scheme matches ONLY http or https in Chromium
+    schemeRegex = 'https?';
+  } else if (['http', 'https', 'file'].includes(scheme)) {
+    schemeRegex = scheme;
+  } else {
+    throw new Error(`Invalid scheme in match pattern: "${scheme}"`);
+  }
+
+  // 2. Host compilation
+  let hostRegex = '';
+  if (scheme === 'file') {
+    // For file:///, host MUST be empty
+    if (rawHostWithPort !== '') {
+      throw new Error(`File scheme match pattern host must be empty (e.g. file:///path), got "${rawHostWithPort}"`);
+    }
+    hostRegex = '';
+  } else {
+    if (!rawHostWithPort) {
+      throw new Error(`Host cannot be empty for scheme "${scheme}"`);
+    }
+
+    const hostWithPort = rawHostWithPort.toLowerCase();
+    let host = hostWithPort;
+    let port = '';
+
+    // Handle IPv6 literal bracket notation: [::1] or [::1]:8080
+    if (hostWithPort.startsWith('[')) {
+      const closeBracketIdx = hostWithPort.indexOf(']');
+      if (closeBracketIdx === -1) {
+        throw new Error(`Invalid IPv6 host in match pattern: "${hostWithPort}"`);
+      }
+      host = hostWithPort.slice(0, closeBracketIdx + 1);
+      const ipv6Content = hostWithPort.slice(1, closeBracketIdx);
+      if (!ipv6Content) {
+        throw new Error(`Empty IPv6 host in match pattern: "${hostWithPort}"`);
+      }
+      if (host.includes('*')) {
+        throw new Error(`Wildcard '*' is not allowed in IPv6 host: "${host}"`);
+      }
+      const rest = hostWithPort.slice(closeBracketIdx + 1);
+      if (rest.startsWith(':')) {
+        port = rest.slice(1);
+        if (port !== '*' && !/^\d+$/.test(port)) {
+          throw new Error(`Invalid port in match pattern: "${port}"`);
+        }
+      } else if (rest !== '') {
+        throw new Error(`Invalid characters after IPv6 host in match pattern: "${hostWithPort}"`);
+      }
+    } else {
+      if (hostWithPort.includes('[') || hostWithPort.includes(']')) {
+        throw new Error(`Invalid host syntax in match pattern: "${hostWithPort}"`);
+      }
+      const colonIdx = hostWithPort.lastIndexOf(':');
+      if (colonIdx !== -1) {
+        host = hostWithPort.slice(0, colonIdx);
+        port = hostWithPort.slice(colonIdx + 1);
+        if (port !== '*' && !/^\d+$/.test(port)) {
+          throw new Error(`Invalid port in match pattern: "${port}"`);
+        }
+      }
+    }
+
+    if (!host) {
+      throw new Error(`Host cannot be empty in match pattern: "${pattern}"`);
+    }
+
+    if (host === '*') {
+      // Universal host wildcard matches DNS/IPv4 hostnames and bracketed IPv6 literals
+      hostRegex = '(?:\\[[^\\]]+\\]|[^/:]+)';
+    } else if (host.startsWith('*.')) {
+      const rootDomain = host.slice(2);
+      if (!rootDomain || rootDomain.includes('*') || rootDomain.startsWith('.')) {
+        throw new Error(`Invalid host wildcard in match pattern: "${host}"`);
+      }
+      const escapedRoot = rootDomain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // *.example.com matches example.com AND any.subdomain.example.com
+      hostRegex = `(?:[^/:]+\\.)?${escapedRoot}`;
+    } else {
+      if (host.includes('*')) {
+        throw new Error(`Wildcard '*' in host is only allowed as standalone '*' or prefix '*.': "${host}"`);
+      }
+      hostRegex = host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    // Optional port matching
+    if (port) {
+      if (port === '*') {
+        hostRegex += '(?::\\d+)?';
+      } else {
+        hostRegex += `:${port}`;
+      }
+    } else {
+      // If pattern specifies no port, allow optional port on tested URL
+      hostRegex += '(?::\\d+)?';
+    }
+  }
+
+  // 3. Path compilation
+  if (!path.startsWith('/')) {
+    throw new Error(`Path must start with '/': "${path}"`);
+  }
+
+  // Collapse redundant path wildcards to prevent catastrophic ReDoS (/*/*/*/*/* -> /*, *** -> *)
+  const normalizedPath = path.replace(/\*+/g, '*').replace(/(?:\/\*)+/g, '/*');
+
+  // Path wildcards: replace * with .* while escaping regex special characters
+  const pathParts = normalizedPath.split('*');
+  const escapedParts = pathParts.map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'));
+  const pathRegex = escapedParts.join('.*');
+
+  return new RegExp(`^${schemeRegex}:\\/\\/${hostRegex}${pathRegex}$`);
+}
+
+/**
+ * Validates whether a pattern string is a syntactically valid Chromium match pattern.
+ */
+export function isValidMatchPattern(pattern: unknown): boolean {
+  if (typeof pattern !== 'string' || !pattern.trim()) {
+    return false;
+  }
+  try {
+    compileMatchPattern(pattern);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Tests whether a URL matches a given Chromium match pattern.
+ * Safely handles invalid patterns and URLs by returning false.
+ */
+export function matchesUrl(pattern: string, url: string): boolean {
+  if (typeof pattern !== 'string' || typeof url !== 'string') {
+    return false;
+  }
+  if (isRestrictedUrl(url)) {
+    return false;
+  }
+
+  const normalized = normalizeUrl(url);
+
+  try {
+    const re = compileMatchPattern(pattern);
+    return re.test(normalized);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Tests whether a URL matches any pattern in a list of Chromium match patterns.
+ * Gracefully ignores malformed patterns in the list.
+ */
+export function matchesAny(patterns: string[], url: string): boolean {
+  if (!Array.isArray(patterns) || patterns.length === 0 || typeof url !== 'string') {
+    return false;
+  }
+  if (isRestrictedUrl(url)) {
+    return false;
+  }
+
+  const normalized = normalizeUrl(url);
+
+  for (const pattern of patterns) {
+    if (typeof pattern !== 'string') continue;
+    try {
+      const re = compileMatchPattern(pattern);
+      if (re.test(normalized)) {
+        return true;
+      }
+    } catch {
+      // Malformed pattern in array is ignored
+    }
+  }
+
+  return false;
+}

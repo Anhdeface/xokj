@@ -1,0 +1,37 @@
+{
+  "name": "xokj",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Chromium Userscript Manager with Hybrid CDP Control Plane",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "build:fast": "vite build",
+    "type-check": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.8.0",
+    "@codemirror/lang-javascript": "^6.2.2",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/theme-one-dark": "^6.1.2",
+    "@codemirror/view": "^6.36.4",
+    "codemirror": "^6.0.1",
+    "vue": "3.5.13"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "2.7.1",
+    "@types/chrome": "^0.0.307",
+    "@types/node": "^22.13.4",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "@vue/test-utils": "^2.4.6",
+    "happy-dom": "^16.8.1",
+    "typescript": "^5.7.3",
+    "vite": "5.4.14",
+    "vitest": "3.2.7",
+    "vue-tsc": "^2.2.0"
+  }
+}
