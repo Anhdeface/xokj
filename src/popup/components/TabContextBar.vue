@@ -8,7 +8,7 @@
         class="favicon"
         @error="handleFaviconError"
       />
-      <span v-else class="globe-icon">🌐</span>
+      <i v-else class="fa-solid fa-globe globe-icon"></i>
       <span class="hostname">{{ hostname || 'No active tab' }}</span>
     </div>
     <div class="tab-meta">
@@ -20,7 +20,7 @@
         title="Reload tab to apply userscript changes"
         @click="$emit('reloadTab')"
       >
-        ↻
+        <i class="fa-solid fa-rotate-right"></i>
       </button>
     </div>
   </div>
@@ -52,14 +52,14 @@ function handleFaviconError() {
   align-items: center;
   justify-content: space-between;
   padding: 8px 14px;
-  background-color: #141418;
-  border-bottom: 1px solid #23232b;
+  background-color: #10121a;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   font-size: 11px;
 }
 .tab-host {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   overflow: hidden;
   max-width: 220px;
 }
@@ -67,17 +67,19 @@ function handleFaviconError() {
   width: 14px;
   height: 14px;
   flex-shrink: 0;
-  border-radius: 2px;
+  border-radius: 3px;
 }
 .globe-icon {
-  font-size: 12px;
+  font-size: 11px;
+  color: #64748b;
 }
 .hostname {
-  color: #a1a1aa;
+  color: #94a3b8;
   font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-size: 11px;
 }
 .tab-meta {
   display: flex;
@@ -85,30 +87,35 @@ function handleFaviconError() {
   gap: 8px;
 }
 .match-count-badge {
-  background-color: #272733;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   color: #cbd5e1;
-  padding: 2px 6px;
-  border-radius: 4px;
+  padding: 2px 7px;
+  border-radius: 9999px;
   font-size: 10px;
   font-weight: 500;
 }
 .reload-tab-btn {
-  background: none;
-  border: 1px solid #333342;
-  color: #a1a1aa;
-  width: 20px;
-  height: 20px;
-  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #94a3b8;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  font-size: 13px;
-  line-height: 1;
+  font-size: 10px;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .reload-tab-btn:hover {
-  border-color: #6366f1;
+  border-color: rgba(99, 102, 241, 0.6);
   color: #ffffff;
-  background-color: #272733;
+  background-color: rgba(99, 102, 241, 0.18);
+  transform: rotate(45deg);
+}
+.reload-tab-btn:active {
+  transform: rotate(180deg) scale(0.92);
 }
 </style>

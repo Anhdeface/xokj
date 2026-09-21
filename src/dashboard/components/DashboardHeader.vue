@@ -1,14 +1,22 @@
 <template>
   <header class="dashboard-header">
     <div class="header-left">
-      <div class="logo-badge">⚡</div>
+      <div class="logo-badge">
+        <i class="fa-solid fa-bolt"></i>
+      </div>
       <div class="brand-titles">
         <h1 class="main-title">XOKJ Dashboard</h1>
         <span class="sub-title">Userscript & CDP Manager</span>
       </div>
       <div class="stat-chips">
-        <span class="chip total-chip">{{ scriptsCount }} scripts</span>
-        <span v-if="cdpScriptsCount > 0" class="chip cdp-chip">⚡ {{ cdpScriptsCount }} CDP</span>
+        <span class="chip total-chip">
+          <i class="fa-solid fa-layer-group chip-icon"></i>
+          <span>{{ scriptsCount }} scripts</span>
+        </span>
+        <span v-if="cdpScriptsCount > 0" class="chip cdp-chip">
+          <i class="fa-solid fa-bolt chip-icon"></i>
+          <span>{{ cdpScriptsCount }} CDP</span>
+        </span>
       </div>
     </div>
 
@@ -18,7 +26,7 @@
         @click="$emit('newScript')"
         title="Create new userscript"
       >
-        <span class="btn-icon">+</span>
+        <i class="fa-solid fa-plus btn-icon"></i>
         <span>New Script</span>
       </button>
 
@@ -27,7 +35,7 @@
         @click="$emit('importScripts')"
         title="Import scripts from JSON or user.js file"
       >
-        <span class="btn-icon">📥</span>
+        <i class="fa-solid fa-file-arrow-up btn-icon"></i>
         <span>Import</span>
       </button>
 
@@ -36,7 +44,7 @@
         @click="$emit('exportAll')"
         title="Export all scripts as JSON"
       >
-        <span class="btn-icon">📤</span>
+        <i class="fa-solid fa-file-export btn-icon"></i>
         <span>Export</span>
       </button>
 
@@ -45,7 +53,7 @@
         @click="$emit('resetDefaults')"
         title="Reset scripts to initial default samples"
       >
-        <span class="btn-icon">↺</span>
+        <i class="fa-solid fa-arrow-rotate-left btn-icon"></i>
         <span>Reset Defaults</span>
       </button>
     </div>
@@ -72,29 +80,34 @@ defineEmits<{
   align-items: center;
   justify-content: space-between;
   padding: 12px 24px;
-  background-color: #16161a;
-  border-bottom: 1px solid #272733;
-  color: #f4f4f5;
+  background: linear-gradient(180deg, #13151f 0%, #0e1017 100%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: #f1f5f9;
   user-select: none;
 }
 
 .header-left {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
 }
 
 .logo-badge {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 18px;
-  color: #fff;
-  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
+  font-size: 16px;
+  color: #ffffff;
+  box-shadow: 0 4px 14px rgba(99, 102, 241, 0.4);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.logo-badge:hover {
+  transform: rotate(8deg) scale(1.06);
+  box-shadow: 0 6px 18px rgba(99, 102, 241, 0.6);
 }
 
 .brand-titles {
@@ -107,38 +120,46 @@ defineEmits<{
   font-weight: 700;
   margin: 0;
   line-height: 1.2;
-  color: #f4f4f5;
+  color: #f8fafc;
   letter-spacing: 0.3px;
 }
 
 .sub-title {
   font-size: 11px;
-  color: #a1a1aa;
+  color: #94a3b8;
+  font-weight: 400;
 }
 
 .stat-chips {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   margin-left: 12px;
 }
 
 .chip {
   font-size: 11px;
-  padding: 2px 8px;
+  padding: 3px 9px;
   border-radius: 9999px;
   font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.chip-icon {
+  font-size: 10px;
 }
 
 .total-chip {
-  background-color: #272733;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   color: #cbd5e1;
 }
 
 .cdp-chip {
-  background-color: rgba(99, 102, 241, 0.15);
+  background: rgba(99, 102, 241, 0.12);
   color: #818cf8;
-  border: 1px solid rgba(99, 102, 241, 0.3);
+  border: 1px solid rgba(99, 102, 241, 0.35);
 }
 
 .header-right {
@@ -150,49 +171,61 @@ defineEmits<{
 .action-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border-radius: 6px;
+  gap: 7px;
+  padding: 7px 13px;
+  border-radius: 7px;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   border: 1px solid transparent;
+}
+.action-btn:active {
+  transform: scale(0.97);
 }
 
 .primary-btn {
-  background-color: #6366f1;
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
   color: #ffffff;
+  box-shadow: 0 2px 10px rgba(99, 102, 241, 0.35);
 }
 
 .primary-btn:hover {
-  background-color: #4f46e5;
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(99, 102, 241, 0.5);
 }
 
 .secondary-btn {
-  background-color: #24242e;
-  border-color: #363645;
-  color: #e4e4e7;
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #e2e8f0;
+  backdrop-filter: blur(8px);
 }
 
 .secondary-btn:hover {
-  background-color: #2e2e3d;
+  background: rgba(255, 255, 255, 0.1);
   color: #ffffff;
-  border-color: #4b4b5e;
+  border-color: rgba(255, 255, 255, 0.2);
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3);
 }
 
 .danger-outline-btn {
   background: transparent;
-  border-color: #7f1d1d;
+  border-color: rgba(239, 68, 68, 0.3);
   color: #f87171;
 }
 
 .danger-outline-btn:hover {
-  background-color: rgba(239, 68, 68, 0.15);
-  border-color: #ef4444;
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.6);
+  color: #fca5a5;
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(239, 68, 68, 0.2);
 }
 
 .btn-icon {
-  font-size: 13px;
+  font-size: 11px;
 }
 </style>

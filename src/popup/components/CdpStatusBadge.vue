@@ -76,75 +76,110 @@ const badgeTooltip = computed(() => {
 .cdp-badge {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 3px 8px;
+  gap: 6px;
+  padding: 3px 9px;
   border-radius: 9999px;
   font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.4px;
   border: 1px solid transparent;
   user-select: none;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .status-indicator {
   width: 6px;
   height: 6px;
   border-radius: 50%;
+  position: relative;
 }
 
-/* ATTACHED: Green */
+/* ATTACHED: Emerald */
 .status-attached {
-  background-color: rgba(16, 185, 129, 0.15);
-  border-color: #10b981;
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.4);
   color: #34d399;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.15);
 }
 .status-attached .status-indicator {
   background-color: #10b981;
-  box-shadow: 0 0 6px rgba(16, 185, 129, 0.7);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.8);
   animation: pulse-dot 2s infinite ease-in-out;
 }
 
 /* ATTACHING: Amber */
 .status-attaching {
-  background-color: rgba(245, 158, 11, 0.15);
-  border-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.4);
   color: #fbbf24;
 }
 .status-attaching .status-indicator {
   background-color: #f59e0b;
-  animation: blink-dot 1s infinite;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.6);
+  animation: blink-dot 1s infinite ease-in-out;
 }
 
-/* CONFLICT: Red */
+/* CONFLICT: Rose / Ruby */
 .status-conflict {
-  background-color: rgba(239, 68, 68, 0.15);
-  border-color: #ef4444;
+  background: rgba(239, 68, 68, 0.14);
+  border-color: rgba(239, 68, 68, 0.5);
   color: #f87171;
+  animation: conflict-shake 3s infinite ease-in-out;
 }
 .status-conflict .status-indicator {
   background-color: #ef4444;
-  box-shadow: 0 0 6px rgba(239, 68, 68, 0.7);
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.8);
 }
 
-/* IDLE & DETACHED: Slate/Gray */
+/* IDLE & DETACHED: Slate */
 .status-idle,
 .status-detached {
-  background-color: rgba(113, 113, 122, 0.15);
-  border-color: #52525b;
-  color: #a1a1aa;
+  background: rgba(100, 116, 139, 0.1);
+  border-color: rgba(100, 116, 139, 0.3);
+  color: #94a3b8;
 }
 .status-idle .status-indicator,
 .status-detached .status-indicator {
-  background-color: #71717a;
+  background-color: #64748b;
 }
 
 @keyframes pulse-dot {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.85); }
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.85);
+  }
 }
 
 @keyframes blink-dot {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.2; }
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+}
+
+@keyframes conflict-shake {
+  0%, 90%, 100% {
+    transform: translateX(0);
+  }
+  92% {
+    transform: translateX(-2px);
+  }
+  94% {
+    transform: translateX(2px);
+  }
+  96% {
+    transform: translateX(-1px);
+  }
+  98% {
+    transform: translateX(1px);
+  }
 }
 </style>

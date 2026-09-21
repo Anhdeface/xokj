@@ -34,9 +34,13 @@
           <div class="editor-header-bar">
             <div class="script-title-area">
               <span class="script-name">{{ selectedScript.name }}</span>
-              <span v-if="isDirty" class="dirty-badge" title="Unsaved changes">• Unsaved</span>
+              <span v-if="isDirty" class="dirty-badge" title="Unsaved changes">
+                <span class="dirty-dot"></span>
+                <span>Unsaved</span>
+              </span>
               <span class="status-pill" :class="selectedScript.enabled ? 'enabled' : 'disabled'">
-                {{ selectedScript.enabled ? 'Enabled' : 'Disabled' }}
+                <i :class="selectedScript.enabled ? 'fa-solid fa-circle-check' : 'fa-solid fa-circle-xmark'" class="status-icon"></i>
+                <span>{{ selectedScript.enabled ? 'Enabled' : 'Disabled' }}</span>
               </span>
             </div>
 
@@ -47,7 +51,8 @@
                 @click="handleRevertChanges"
                 title="Discard editor changes"
               >
-                Revert
+                <i class="fa-solid fa-rotate-left btn-icon"></i>
+                <span>Revert</span>
               </button>
               <button
                 class="btn btn-primary save-btn"
@@ -55,28 +60,32 @@
                 @click="handleSaveScript"
                 title="Save changes (Ctrl+S / Cmd+S)"
               >
-                Save
+                <i class="fa-solid fa-floppy-disk btn-icon"></i>
+                <span>Save</span>
               </button>
               <button
                 class="btn btn-outline toggle-current-btn"
                 @click="handleToggleCurrentScript"
                 :title="selectedScript.enabled ? 'Disable Script' : 'Enable Script'"
               >
-                {{ selectedScript.enabled ? 'Disable' : 'Enable' }}
+                <i class="fa-solid fa-power-off btn-icon"></i>
+                <span>{{ selectedScript.enabled ? 'Disable' : 'Enable' }}</span>
               </button>
               <button
                 class="btn btn-outline export-single-btn"
                 @click="handleExportSingle"
                 title="Export this script to JSON"
               >
-                Export
+                <i class="fa-solid fa-file-export btn-icon"></i>
+                <span>Export</span>
               </button>
               <button
                 class="btn btn-danger delete-btn"
                 @click="showDeleteConfirm = true"
                 title="Delete this script"
               >
-                Delete
+                <i class="fa-solid fa-trash-can btn-icon"></i>
+                <span>Delete</span>
               </button>
             </div>
           </div>
@@ -97,10 +106,15 @@
         </template>
 
         <div v-else class="empty-detail-state">
-          <div class="empty-icon">📜</div>
+          <div class="empty-icon-box">
+            <i class="fa-solid fa-file-code"></i>
+          </div>
           <h3>No Script Selected</h3>
           <p>Choose a script from the sidebar to inspect metadata and edit code, or create a new one.</p>
-          <button class="btn btn-primary" @click="handleCreateNewScript">+ Create New Script</button>
+          <button class="btn btn-primary create-script-btn" @click="handleCreateNewScript">
+            <i class="fa-solid fa-plus btn-icon"></i>
+            <span>Create New Script</span>
+          </button>
         </div>
       </section>
     </main>
@@ -487,10 +501,26 @@ html, body {
   margin: 0;
   padding: 0;
   height: 100%;
-  background-color: #121215;
+  background-color: #0b0d14;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  color: #f4f4f5;
+  color: #f1f5f9;
   overflow: hidden;
+}
+
+/* Sleek custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
 }
 </style>
 
@@ -499,7 +529,7 @@ html, body {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background-color: #121215;
+  background-color: #0b0d14;
 }
 
 .dashboard-body {
@@ -519,7 +549,7 @@ html, body {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background-color: #18181b;
+  background-color: #141722;
   overflow: hidden;
 }
 
@@ -527,50 +557,72 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 18px;
-  background-color: #1e1e24;
-  border-bottom: 1px solid #272733;
+  padding: 11px 20px;
+  background: linear-gradient(180deg, #181b26 0%, #141722 100%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .script-title-area {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   overflow: hidden;
 }
 
 .script-name {
   font-size: 14px;
   font-weight: 700;
-  color: #f4f4f5;
+  color: #f8fafc;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  letter-spacing: 0.2px;
 }
 
 .dirty-badge {
   font-size: 11px;
-  color: #f59e0b;
+  color: #fbbf24;
   font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  padding: 2px 7px;
+  border-radius: 9999px;
+}
+.dirty-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.8);
+  animation: pulse-dot 1.5s infinite ease-in-out;
 }
 
 .status-pill {
   font-size: 10px;
   font-weight: 600;
-  padding: 2px 6px;
-  border-radius: 4px;
+  padding: 2px 7px;
+  border-radius: 9999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.status-icon {
+  font-size: 9px;
 }
 
 .status-pill.enabled {
-  background-color: rgba(16, 185, 129, 0.15);
+  background-color: rgba(16, 185, 129, 0.12);
   color: #34d399;
-  border: 1px solid rgba(16, 185, 129, 0.3);
+  border: 1px solid rgba(16, 185, 129, 0.35);
 }
 
 .status-pill.disabled {
-  background-color: rgba(113, 113, 122, 0.15);
-  color: #a1a1aa;
-  border: 1px solid rgba(113, 113, 122, 0.3);
+  background-color: rgba(100, 116, 139, 0.12);
+  color: #94a3b8;
+  border: 1px solid rgba(100, 116, 139, 0.3);
 }
 
 .editor-action-buttons {
@@ -580,13 +632,19 @@ html, body {
 }
 
 .btn {
-  padding: 5px 12px;
-  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 6px;
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   border: 1px solid transparent;
-  transition: all 0.15s ease;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 .btn:disabled {
@@ -594,45 +652,59 @@ html, body {
   cursor: not-allowed;
 }
 
+.btn-icon {
+  font-size: 11px;
+}
+
 .btn-primary {
-  background-color: #6366f1;
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
   color: #ffffff;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
 }
 
 .btn-primary:hover:not(:disabled) {
-  background-color: #4f46e5;
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.45);
 }
 
 .btn-secondary {
-  background-color: #272733;
-  color: #e4e4e7;
-  border-color: #363645;
+  background-color: rgba(255, 255, 255, 0.05);
+  color: #e2e8f0;
+  border-color: rgba(255, 255, 255, 0.1);
 }
 
 .btn-secondary:hover:not(:disabled) {
-  background-color: #323242;
+  background-color: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+  transform: translateY(-1px);
 }
 
 .btn-outline {
   background: transparent;
-  border-color: #363645;
-  color: #d4d4d8;
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #cbd5e1;
 }
 
 .btn-outline:hover:not(:disabled) {
-  background-color: #272733;
+  background-color: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.2);
   color: #ffffff;
+  transform: translateY(-1px);
 }
 
 .btn-danger {
-  background-color: rgba(239, 68, 68, 0.15);
-  border-color: #ef4444;
+  background-color: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.4);
   color: #f87171;
 }
 
 .btn-danger:hover:not(:disabled) {
-  background-color: #ef4444;
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
   color: #ffffff;
+  border-color: transparent;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
 }
 
 .editor-viewport {
@@ -647,26 +719,54 @@ html, body {
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: #71717a;
+  color: #64748b;
   text-align: center;
   padding: 40px;
 }
 
-.empty-icon {
-  font-size: 48px;
-  margin-bottom: 12px;
+.empty-icon-box {
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  background: rgba(99, 102, 241, 0.1);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  color: #818cf8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  margin-bottom: 16px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  animation: float-box 3s ease-in-out infinite;
 }
 
 .empty-detail-state h3 {
   font-size: 16px;
-  color: #f4f4f5;
+  color: #f1f5f9;
   margin: 0 0 8px 0;
+  letter-spacing: 0.2px;
 }
 
 .empty-detail-state p {
   font-size: 13px;
-  max-width: 320px;
-  margin: 0 0 18px 0;
+  max-width: 340px;
+  color: #94a3b8;
+  margin: 0 0 20px 0;
   line-height: 1.5;
+}
+
+.create-script-btn {
+  padding: 8px 16px;
+  font-size: 12px;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.8); }
+}
+
+@keyframes float-box {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
 }
 </style>

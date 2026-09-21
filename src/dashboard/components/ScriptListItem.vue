@@ -37,7 +37,8 @@
       </span>
 
       <span v-if="hasCdp" class="meta-badge cdp-badge" title="CDP active">
-        ⚡ CDP
+        <i class="fa-solid fa-bolt cdp-mini-icon"></i>
+        <span>CDP</span>
       </span>
 
       <span v-if="primaryMatch" class="meta-badge match-badge" :title="primaryMatch">
@@ -88,25 +89,27 @@ const primaryMatch = computed(() => {
 
 <style scoped>
 .script-list-item {
-  padding: 10px 14px;
-  border-bottom: 1px solid #24242e;
+  padding: 11px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
   cursor: pointer;
   background-color: transparent;
-  transition: all 0.15s ease;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   user-select: none;
+  position: relative;
 }
 
 .script-list-item:hover {
-  background-color: #1e1e26;
+  background-color: rgba(255, 255, 255, 0.04);
 }
 
 .script-list-item.selected {
-  background-color: #242432;
+  background-color: #1a1e2b;
   border-left: 3px solid #6366f1;
+  box-shadow: inset 0 0 16px rgba(99, 102, 241, 0.08);
 }
 
 .script-list-item.disabled {
-  opacity: 0.65;
+  opacity: 0.6;
 }
 
 .item-top {
@@ -119,35 +122,42 @@ const primaryMatch = computed(() => {
 .item-title-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   overflow: hidden;
 }
 
 .script-title {
   font-size: 13px;
   font-weight: 600;
-  color: #f4f4f5;
+  color: #f1f5f9;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  transition: color 0.15s ease;
+}
+
+.script-list-item.selected .script-title {
+  color: #ffffff;
 }
 
 .item-version {
   font-size: 9px;
   color: #94a3b8;
-  background-color: #2e2e3d;
+  background-color: #202433;
+  border: 1px solid rgba(255, 255, 255, 0.06);
   padding: 1px 4px;
-  border-radius: 3px;
-  font-family: monospace;
+  border-radius: 4px;
+  font-family: ui-monospace, monospace;
 }
 
 .item-desc {
   font-size: 11px;
-  color: #a1a1aa;
-  margin: 4px 0 6px 0;
+  color: #94a3b8;
+  margin: 4px 0 7px 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1.3;
 }
 
 .item-meta-row {
@@ -160,38 +170,46 @@ const primaryMatch = computed(() => {
 .meta-badge {
   font-size: 9px;
   font-weight: 600;
-  padding: 1px 5px;
-  border-radius: 3px;
+  padding: 1px 6px;
+  border-radius: 4px;
 }
 
 .run-at-badge.timing-start {
-  background-color: rgba(6, 182, 212, 0.15);
+  background-color: rgba(6, 182, 212, 0.12);
   color: #22d3ee;
-  border: 1px solid rgba(6, 182, 212, 0.3);
+  border: 1px solid rgba(6, 182, 212, 0.35);
 }
 
 .run-at-badge.timing-end {
-  background-color: rgba(168, 85, 247, 0.15);
+  background-color: rgba(168, 85, 247, 0.12);
   color: #c084fc;
-  border: 1px solid rgba(168, 85, 247, 0.3);
+  border: 1px solid rgba(168, 85, 247, 0.35);
 }
 
 .run-at-badge.timing-idle {
-  background-color: rgba(100, 116, 139, 0.15);
+  background-color: rgba(100, 116, 139, 0.12);
   color: #94a3b8;
-  border: 1px solid rgba(100, 116, 139, 0.3);
+  border: 1px solid rgba(100, 116, 139, 0.35);
 }
 
 .cdp-badge {
-  background-color: rgba(99, 102, 241, 0.15);
+  background: rgba(99, 102, 241, 0.12);
   color: #818cf8;
-  border: 1px solid rgba(99, 102, 241, 0.3);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.cdp-mini-icon {
+  font-size: 8px;
+  color: #a5b4fc;
 }
 
 .match-badge {
-  background-color: #272733;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   color: #94a3b8;
-  font-family: monospace;
+  font-family: ui-monospace, monospace;
   max-width: 140px;
   white-space: nowrap;
   overflow: hidden;
@@ -214,23 +232,27 @@ const primaryMatch = computed(() => {
   position: absolute;
   cursor: pointer;
   top: 0; left: 0; right: 0; bottom: 0;
-  background-color: #3f3f46;
+  background-color: #334155;
   border-radius: 16px;
-  transition: 0.2s;
+  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 .item-slider:before {
   position: absolute;
   content: "";
   height: 12px;
   width: 12px;
-  left: 2px;
-  bottom: 2px;
+  left: 1px;
+  bottom: 1px;
   background-color: white;
   border-radius: 50%;
-  transition: 0.2s;
+  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 input:checked + .item-slider {
-  background-color: #10b981;
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  border-color: rgba(16, 185, 129, 0.5);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
 }
 input:checked + .item-slider:before {
   transform: translateX(14px);

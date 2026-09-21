@@ -16,10 +16,12 @@
             {{ timingLabel }}
           </span>
           <span v-if="hasCdp" class="cdp-badge-tag" :title="cdpTooltip">
-            ⚡ {{ cdpLabel }}
+            <i class="fa-solid fa-bolt cdp-icon"></i>
+            <span>{{ cdpLabel }}</span>
           </span>
           <span v-if="hasGrants" class="grant-badge-tag">
-            {{ grantsLabel }}
+            <i class="fa-solid fa-key grant-icon"></i>
+            <span>{{ grantsLabel }}</span>
           </span>
         </div>
       </div>
@@ -38,7 +40,7 @@
           title="Edit in Dashboard"
           @click="$emit('edit', script.id)"
         >
-          ✏️
+          <i class="fa-solid fa-pen-to-square"></i>
         </button>
       </div>
     </div>
@@ -107,19 +109,22 @@ const grantsLabel = computed(() => {
 
 <style scoped>
 .script-card {
-  background-color: #1a1a20;
-  border: 1px solid #272733;
-  border-radius: 7px;
-  padding: 10px 12px;
+  background-color: #161822;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 11px 13px;
   margin: 6px 14px;
-  transition: all 0.15s ease;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 .script-card:hover {
-  background-color: #202028;
-  border-color: #3b3b4d;
+  background-color: #1c202d;
+  border-color: rgba(99, 102, 241, 0.35);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
 }
 .script-card.card-disabled {
-  opacity: 0.6;
+  opacity: 0.55;
 }
 .card-main {
   display: flex;
@@ -134,32 +139,34 @@ const grantsLabel = computed(() => {
 .title-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   margin-bottom: 3px;
 }
 .script-name {
   font-size: 13px;
   font-weight: 600;
-  color: #f4f4f5;
+  color: #f1f5f9;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .version-tag {
   font-size: 9px;
-  background-color: #2e2e3d;
+  background-color: #242938;
+  border: 1px solid rgba(255, 255, 255, 0.06);
   color: #94a3b8;
-  padding: 1px 4px;
-  border-radius: 3px;
-  font-family: monospace;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: ui-monospace, monospace;
 }
 .script-desc {
   font-size: 11px;
-  color: #a1a1aa;
-  margin: 0 0 6px 0;
+  color: #94a3b8;
+  margin: 0 0 7px 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1.3;
 }
 .badges-row {
   display: flex;
@@ -170,41 +177,55 @@ const grantsLabel = computed(() => {
 .timing-badge {
   font-size: 9px;
   font-weight: 600;
-  padding: 1px 5px;
-  border-radius: 3px;
+  padding: 1px 6px;
+  border-radius: 4px;
   text-transform: uppercase;
+  letter-spacing: 0.3px;
 }
 .timing-start {
-  background-color: rgba(6, 182, 212, 0.15);
+  background-color: rgba(6, 182, 212, 0.12);
   color: #22d3ee;
-  border: 1px solid rgba(6, 182, 212, 0.4);
+  border: 1px solid rgba(6, 182, 212, 0.35);
 }
 .timing-end {
-  background-color: rgba(168, 85, 247, 0.15);
+  background-color: rgba(168, 85, 247, 0.12);
   color: #c084fc;
-  border: 1px solid rgba(168, 85, 247, 0.4);
+  border: 1px solid rgba(168, 85, 247, 0.35);
 }
 .timing-idle {
-  background-color: rgba(100, 116, 139, 0.15);
+  background-color: rgba(100, 116, 139, 0.12);
   color: #94a3b8;
-  border: 1px solid rgba(100, 116, 139, 0.4);
+  border: 1px solid rgba(100, 116, 139, 0.35);
 }
 .cdp-badge-tag {
   font-size: 9px;
   font-weight: 600;
-  background-color: rgba(99, 102, 241, 0.15);
+  background: rgba(99, 102, 241, 0.12);
   color: #818cf8;
-  border: 1px solid rgba(99, 102, 241, 0.4);
-  padding: 1px 5px;
-  border-radius: 3px;
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  padding: 1px 6px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.cdp-icon {
+  font-size: 8px;
+  color: #a5b4fc;
 }
 .grant-badge-tag {
   font-size: 9px;
-  background-color: rgba(234, 179, 8, 0.12);
-  color: #facc15;
+  background-color: rgba(234, 179, 8, 0.1);
+  color: #fbbf24;
   border: 1px solid rgba(234, 179, 8, 0.3);
-  padding: 1px 4px;
-  border-radius: 3px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.grant-icon {
+  font-size: 8px;
 }
 .card-action {
   display: flex;
@@ -214,16 +235,20 @@ const grantsLabel = computed(() => {
   padding-top: 2px;
 }
 .edit-btn {
-  background: none;
-  border: none;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
   cursor: pointer;
-  font-size: 11px;
-  opacity: 0.6;
-  padding: 2px;
-  transition: opacity 0.15s;
+  font-size: 10px;
+  color: #94a3b8;
+  padding: 3px 5px;
+  transition: all 0.2s ease;
 }
 .edit-btn:hover {
-  opacity: 1;
+  color: #818cf8;
+  background-color: rgba(99, 102, 241, 0.15);
+  border-color: rgba(99, 102, 241, 0.4);
+  transform: scale(1.08);
 }
 
 /* Item switch */
@@ -242,29 +267,33 @@ const grantsLabel = computed(() => {
   position: absolute;
   cursor: pointer;
   top: 0; left: 0; right: 0; bottom: 0;
-  background-color: #3f3f46;
+  background-color: #334155;
   border-radius: 18px;
-  transition: 0.2s;
+  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 .item-slider:before {
   position: absolute;
   content: "";
   height: 12px;
   width: 12px;
-  left: 3px;
-  bottom: 3px;
+  left: 2px;
+  bottom: 2px;
   background-color: white;
   border-radius: 50%;
-  transition: 0.2s;
+  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 input:checked + .item-slider {
-  background-color: #10b981;
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  border-color: rgba(16, 185, 129, 0.5);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
 }
 input:checked + .item-slider:before {
   transform: translateX(14px);
 }
 input:disabled + .item-slider {
   cursor: not-allowed;
-  opacity: 0.5;
+  opacity: 0.4;
 }
 </style>

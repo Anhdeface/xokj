@@ -112,7 +112,8 @@ describe('Feature 19-21: Popup UI Component Suite (test/unit/popup.spec.ts)', ()
 
       expect(wrapper.text()).toContain('v2.1.0');
       expect(wrapper.text()).toContain('start');
-      expect(wrapper.text()).toContain('⚡ Network');
+      expect(wrapper.text()).toContain('Network');
+      expect(wrapper.find('.cdp-badge-tag').exists()).toBe(true);
     });
   });
 

@@ -14,6 +14,7 @@
       <div class="control-label">
         <span class="label-primary">Script Engine</span>
         <span class="label-status" :class="{ 'status-off': !globalEnabled }">
+          <i class="fa-solid fa-circle-dot status-icon"></i>
           {{ globalEnabled ? 'Active' : 'Paused' }}
         </span>
       </div>
@@ -50,13 +51,13 @@ defineEmits<{
   align-items: center;
   justify-content: space-between;
   padding: 10px 14px;
-  background-color: #1a1a20;
-  border-bottom: 1px solid #27272f;
+  background-color: #141722;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 .control-left {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 11px;
 }
 .control-label {
   display: flex;
@@ -65,18 +66,26 @@ defineEmits<{
 .label-primary {
   font-size: 12px;
   font-weight: 600;
-  color: #f4f4f5;
+  color: #f1f5f9;
+  letter-spacing: 0.2px;
 }
 .label-status {
   font-size: 10px;
-  color: #10b981;
+  color: #34d399;
   font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: color 0.2s ease;
+}
+.status-icon {
+  font-size: 7px;
 }
 .label-status.status-off {
-  color: #ef4444;
+  color: #f87171;
 }
 
-/* Custom iOS-style Switch */
+/* Custom smooth switch */
 .toggle-switch {
   position: relative;
   display: inline-block;
@@ -92,23 +101,27 @@ defineEmits<{
   position: absolute;
   cursor: pointer;
   top: 0; left: 0; right: 0; bottom: 0;
-  background-color: #3f3f46;
+  background-color: #334155;
   border-radius: 20px;
-  transition: 0.2s;
+  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 .slider:before {
   position: absolute;
   content: "";
   height: 14px;
   width: 14px;
-  left: 3px;
-  bottom: 3px;
-  background-color: white;
+  left: 2px;
+  bottom: 2px;
+  background-color: #ffffff;
   border-radius: 50%;
-  transition: 0.2s;
+  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
 }
 input:checked + .slider {
-  background-color: #6366f1;
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  border-color: rgba(99, 102, 241, 0.6);
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.4);
 }
 input:checked + .slider:before {
   transform: translateX(16px);
