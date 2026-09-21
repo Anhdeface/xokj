@@ -133,6 +133,16 @@ export class MockRuntimeMessageEvent {
  */
 export class MockStorageArea {
   private store: Record<string, any> = {};
+  private onChanged?: MockEvent<(changes: Record<string, any>, areaName: string) => void>;
+  private areaName: string;
+
+  constructor(
+    onChanged?: MockEvent<(changes: Record<string, any>, areaName: string) => void>,
+    areaName = 'local'
+  ) {
+    this.onChanged = onChanged;
+    this.areaName = areaName;
+  }
 
   private clone<T>(val: T): T {
     if (val === null || typeof val !== 'object') return val;
@@ -165,20 +175,48 @@ export class MockStorageArea {
   }
 
   async set(items: Record<string, any>): Promise<void> {
+    const changes: Record<string, any> = {};
     for (const [k, v] of Object.entries(items)) {
+      changes[k] = {
+        oldValue: this.clone(this.store[k]),
+        newValue: this.clone(v)
+      };
       this.store[k] = this.clone(v);
+    }
+    if (this.onChanged && Object.keys(changes).length > 0) {
+      this.onChanged._emit(changes, this.areaName);
     }
   }
 
   async remove(keys: string | string[]): Promise<void> {
     const list = Array.isArray(keys) ? keys : [keys];
+    const changes: Record<string, any> = {};
     for (const k of list) {
-      delete this.store[k];
+      if (k in this.store) {
+        changes[k] = {
+          oldValue: this.clone(this.store[k]),
+          newValue: undefined
+        };
+        delete this.store[k];
+      }
+    }
+    if (this.onChanged && Object.keys(changes).length > 0) {
+      this.onChanged._emit(changes, this.areaName);
     }
   }
 
   async clear(): Promise<void> {
+    const changes: Record<string, any> = {};
+    for (const k of Object.keys(this.store)) {
+      changes[k] = {
+        oldValue: this.clone(this.store[k]),
+        newValue: undefined
+      };
+    }
     this.store = {};
+    if (this.onChanged && Object.keys(changes).length > 0) {
+      this.onChanged._emit(changes, this.areaName);
+    }
   }
 
   // Debug helper
@@ -254,14 +292,39 @@ export function createMockDebugger() {
 export function createMockWebNavigation() {
   const onBeforeNavigate = new MockEvent<(details: any) => void>();
   const onCommitted = new MockEvent<(details: any) => void>();
+  const onDOMContentLoaded = new MockEvent<(details: any) => void>();
   const onCompleted = new MockEvent<(details: any) => void>();
 
   return {
     onBeforeNavigate,
     onCommitted,
+    onDOMContentLoaded,
     onCompleted,
     _emitBeforeNavigate: (details: { tabId: number; url: string; frameId?: number; timeStamp?: number }) => {
-      onBeforeNavigate._emit({
+      return onBeforeNavigate._emit({
+        frameId: 0,
+        timeStamp: Date.now(),
+        ...details
+      });
+    },
+    _emitCommitted: (details: { tabId: number; url: string; frameId?: number; timeStamp?: number; transitionType?: string; transitionQualifiers?: string[] }) => {
+      return onCommitted._emit({
+        frameId: 0,
+        timeStamp: Date.now(),
+        transitionType: 'link',
+        transitionQualifiers: [],
+        ...details
+      });
+    },
+    _emitDOMContentLoaded: (details: { tabId: number; url: string; frameId?: number; timeStamp?: number }) => {
+      return onDOMContentLoaded._emit({
+        frameId: 0,
+        timeStamp: Date.now(),
+        ...details
+      });
+    },
+    _emitCompleted: (details: { tabId: number; url: string; frameId?: number; timeStamp?: number }) => {
+      return onCompleted._emit({
         frameId: 0,
         timeStamp: Date.now(),
         ...details
@@ -270,6 +333,7 @@ export function createMockWebNavigation() {
     _reset: () => {
       onBeforeNavigate._clear();
       onCommitted._clear();
+      onDOMContentLoaded._clear();
       onCompleted._clear();
     }
   };
@@ -277,39 +341,72 @@ export function createMockWebNavigation() {
 
 export function createMockRuntime() {
   const onMessage = new MockRuntimeMessageEvent();
-  const sendMessage = vi.fn(async (message: any) => {});
+  const sendMessage = vi.fn(async (message: any, callback?: (response: any) => void): Promise<any> => {
+    if (typeof callback === 'function') {
+      callback(undefined);
+    }
+    return undefined;
+  });
+  const openOptionsPage = vi.fn(async () => {});
 
   return {
     lastError: undefined as { message?: string } | undefined,
     sendMessage,
     onMessage,
+    openOptionsPage,
     _emitMessage: onMessage._emitMessage,
     _reset: () => {
       sendMessage.mockClear();
       onMessage._clear();
+      openOptionsPage.mockClear();
     }
   };
 }
 
 export function createMockTabs() {
-  const sendMessage = vi.fn(async (tabId: number, message: any) => {});
+  const sendMessage = vi.fn(async (tabId: number, message: any, options?: any) => {});
   const query = vi.fn(async (queryInfo: any) => [{ id: 1, url: 'https://example.com' }]);
   const get = vi.fn(async (tabId: number) => ({ id: tabId, url: 'https://example.com' }));
+  const reload = vi.fn(async (tabId?: number) => {});
+  const create = vi.fn(async (props: any) => ({ id: 99, ...props }));
   const onRemoved = new MockEvent<(tabId: number, removeInfo: any) => void>();
+  const onUpdated = new MockEvent<(tabId: number, changeInfo: any, tab: any) => void>();
 
   return {
     sendMessage,
     query,
     get,
+    reload,
+    create,
     onRemoved,
+    onUpdated,
     _emitRemoved: (tabId: number) => {
-      onRemoved._emit(tabId, { isWindowClosing: false, windowId: 1 });
+      return onRemoved._emit(tabId, { isWindowClosing: false, windowId: 1 });
+    },
+    _emitUpdated: (tabId: number, changeInfo: any, tab?: any) => {
+      return onUpdated._emit(tabId, changeInfo, tab || { id: tabId, url: changeInfo?.url || 'https://example.com' });
     },
     _reset: () => {
       sendMessage.mockClear();
       query.mockClear();
       get.mockClear();
+      reload.mockClear();
+      create.mockClear();
       onRemoved._clear();
+      onUpdated._clear();
+    }
+  };
+}
+
+export function createMockScripting() {
+  const executeScript = vi.fn(async (options: any): Promise<any[]> => {
+    return [{ result: undefined }];
+  });
+
+  return {
+    executeScript,
+    _reset: () => {
+      executeScript.mockClear();
     }
   };
 }
@@ -317,52 +414,62 @@ export function createMockTabs() {
 export interface ChromeMockContext {
   localStorage: MockStorageArea;
   sessionStorage: MockStorageArea;
+  storageOnChanged: MockEvent<(changes: Record<string, any>, areaName: string) => void>;
   mockDebugger: ReturnType<typeof createMockDebugger>;
   mockWebNavigation: ReturnType<typeof createMockWebNavigation>;
   mockRuntime: ReturnType<typeof createMockRuntime>;
   mockTabs: ReturnType<typeof createMockTabs>;
+  mockScripting: ReturnType<typeof createMockScripting>;
   resetAll: () => void;
 }
 
 /**
  * Initializes and registers the global chrome mock object.
- * Fully backwards compatible with Milestone 1 tests.
+ * Fully backwards compatible with Milestone 1 & 2 tests.
  */
 export function setupChromeMock(): ChromeMockContext {
-  const localStorage = new MockStorageArea();
-  const sessionStorage = new MockStorageArea();
+  const storageOnChanged = new MockEvent<(changes: Record<string, any>, areaName: string) => void>();
+  const localStorage = new MockStorageArea(storageOnChanged, 'local');
+  const sessionStorage = new MockStorageArea(storageOnChanged, 'session');
   const mockDebugger = createMockDebugger();
   const mockWebNavigation = createMockWebNavigation();
   const mockRuntime = createMockRuntime();
   const mockTabs = createMockTabs();
+  const mockScripting = createMockScripting();
 
   const resetAll = () => {
     localStorage.clear();
     sessionStorage.clear();
+    storageOnChanged._clear();
     mockDebugger._reset();
     mockWebNavigation._reset();
     mockRuntime._reset();
     mockTabs._reset();
+    mockScripting._reset();
   };
 
   (globalThis as any).chrome = {
     storage: {
       local: localStorage,
-      session: sessionStorage
+      session: sessionStorage,
+      onChanged: storageOnChanged
     },
     debugger: mockDebugger,
     webNavigation: mockWebNavigation,
     runtime: mockRuntime,
-    tabs: mockTabs
+    tabs: mockTabs,
+    scripting: mockScripting
   };
 
   return {
     localStorage,
     sessionStorage,
+    storageOnChanged,
     mockDebugger,
     mockWebNavigation,
     mockRuntime,
     mockTabs,
+    mockScripting,
     resetAll
   };
 }

@@ -1,4 +1,6 @@
-import type { ScriptRecord, AppSettings } from './types';
+import type { ScriptRecord, AppSettings, ScriptFilter } from './types';
+import { parseMetadata } from './metadata-parser';
+import { matchesAny, isRestrictedUrl } from './match-pattern';
 
 export const STORAGE_KEYS = {
   SCRIPTS: 'scripts',
@@ -250,6 +252,48 @@ export async function getScriptList(): Promise<ScriptRecord[]> {
 }
 
 /**
+ * Extended querying helper with filtering by enabled state, URL pattern match, runAt, search text, domain.
+ */
+export async function getAllScripts(filter?: ScriptFilter): Promise<ScriptRecord[]> {
+  const list = await getScriptList();
+  if (!filter) return list;
+
+  return list.filter((script) => {
+    if (filter.enabled !== undefined && script.enabled !== filter.enabled) return false;
+    if (filter.enabledOnly && !script.enabled) return false;
+    if (filter.runAt && (script.metadata?.runAt || 'document-idle') !== filter.runAt) return false;
+
+    if (filter.search) {
+      const q = filter.search.toLowerCase();
+      const matchName = script.name.toLowerCase().includes(q);
+      const matchDesc = script.metadata?.description?.toLowerCase().includes(q);
+      const matchCode = script.code.toLowerCase().includes(q);
+      if (!matchName && !matchDesc && !matchCode) return false;
+    }
+
+    if (filter.url) {
+      if (isRestrictedUrl(filter.url)) return false;
+      if (matchesAny(script.metadata?.excludes || [], filter.url)) return false;
+      const patterns =
+        script.metadata?.matches?.length
+          ? script.metadata.matches
+          : script.metadata?.matchPatterns?.length
+          ? script.metadata.matchPatterns
+          : script.metadata?.includes || [];
+      if (!matchesAny(patterns, filter.url)) return false;
+    }
+
+    if (filter.domain) {
+      const patterns = script.metadata?.matches || script.metadata?.matchPatterns || [];
+      const hasDomain = patterns.some((p) => p.includes(filter.domain!));
+      if (!hasDomain) return false;
+    }
+
+    return true;
+  });
+}
+
+/**
  * Retrieves a single script by ID, or null if not found.
  */
 export async function getScript(id: string): Promise<ScriptRecord | null> {
@@ -260,23 +304,63 @@ export async function getScript(id: string): Promise<ScriptRecord | null> {
 /**
  * Persists a script to chrome.storage.local.
  * Automatically updates updatedAt and sets createdAt if missing.
+ * Auto-parses metadata from code if code changed or metadata was not provided.
  */
-export async function saveScript(script: ScriptRecord): Promise<ScriptRecord> {
-  if (!script || !script.id) {
-    throw new Error('Cannot save script without a valid ID');
+export async function saveScript(
+  script: ScriptRecord | (Partial<ScriptRecord> & { code: string; id?: string })
+): Promise<ScriptRecord> {
+  if (!script || typeof script.code !== 'string') {
+    throw new Error('Cannot save script without valid source code');
   }
 
   const scripts = await getScripts();
-  const existing = scripts[script.id];
   const now = Date.now();
 
+  let id = script.id;
+  if (!id) {
+    id =
+      typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `script_${now}_${Math.random().toString(36).slice(2, 7)}`;
+  }
+
+  const existing = scripts[id];
+  const existingCodeChanged = Boolean(existing && existing.code !== script.code);
+
+  let metadata = script.metadata;
+  let parseErrors: string[] | undefined = existing?.parseErrors;
+
+  const metadataMissing =
+    !metadata ||
+    ((!metadata.matches || metadata.matches.length === 0) &&
+      (!metadata.matchPatterns || metadata.matchPatterns.length === 0));
+
+  if (existingCodeChanged || metadataMissing) {
+    const parseRes = parseMetadata(script.code);
+    metadata = parseRes.metadata;
+    parseErrors = parseRes.errors.length > 0 ? parseRes.errors : undefined;
+  }
+
+  if (!metadata) {
+    const parseRes = parseMetadata(script.code);
+    metadata = parseRes.metadata;
+  }
+
+  const name = script.name || metadata.name || existing?.name || 'Unnamed Script';
+
   const updatedScript: ScriptRecord = {
-    ...deepClone(script),
+    id,
+    name,
+    code: script.code,
+    metadata: deepClone(metadata),
+    enabled: typeof script.enabled === 'boolean' ? script.enabled : existing?.enabled ?? true,
     createdAt: existing?.createdAt || script.createdAt || now,
-    updatedAt: now
+    updatedAt: now,
+    lastRunAt: existing?.lastRunAt || script.lastRunAt,
+    parseErrors
   };
 
-  scripts[script.id] = updatedScript;
+  scripts[id] = updatedScript;
   await setStorageItem(STORAGE_KEYS.SCRIPTS, scripts);
   return deepClone(updatedScript);
 }
@@ -321,6 +405,158 @@ export async function resetToDefaultScripts(): Promise<Record<string, ScriptReco
   const defaults = deepClone(DEFAULT_SCRIPTS);
   await setStorageItem(STORAGE_KEYS.SCRIPTS, defaults);
   return deepClone(defaults);
+}
+
+/**
+ * Export bundle format.
+ */
+export interface ExportBundle {
+  version: number;
+  exportedAt: number;
+  generator: string;
+  scripts: ScriptRecord[];
+}
+
+/**
+ * Exports userscripts as a formatted JSON string.
+ */
+export async function exportScripts(scriptIds?: string[]): Promise<string> {
+  const all = await getScriptList();
+  const toExport =
+    scriptIds && scriptIds.length > 0
+      ? all.filter((s) => scriptIds.includes(s.id))
+      : all;
+
+  const bundle: ExportBundle = {
+    version: 1,
+    exportedAt: Date.now(),
+    generator: 'XOKJ Userscript Manager',
+    scripts: toExport
+  };
+
+  return JSON.stringify(bundle, null, 2);
+}
+
+/**
+ * Import result statistics.
+ */
+export interface ImportResult {
+  total: number;
+  imported: number;
+  updated: number;
+  failed: number;
+  errors?: string[];
+  scripts?: ScriptRecord[];
+}
+
+/**
+ * Imports scripts from a JSON string or an array of script objects.
+ */
+export async function importScripts(
+  jsonOrArray: string | ScriptRecord[] | any,
+  options: { overwrite?: boolean; autoEnable?: boolean } = {}
+): Promise<ImportResult> {
+  const result: ImportResult = {
+    total: 0,
+    imported: 0,
+    updated: 0,
+    failed: 0,
+    errors: [],
+    scripts: []
+  };
+
+  let rawList: any[] = [];
+  try {
+    if (typeof jsonOrArray === 'string') {
+      const trimmed = jsonOrArray.trim();
+      if (trimmed.startsWith('// ==UserScript==')) {
+        rawList = [{ code: trimmed }];
+      } else {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          rawList = parsed;
+        } else if (parsed && Array.isArray(parsed.scripts)) {
+          rawList = parsed.scripts;
+        } else if (parsed && typeof parsed.code === 'string') {
+          rawList = [parsed];
+        } else {
+          throw new Error('Unrecognized JSON format: expected array or bundle with "scripts"');
+        }
+      }
+    } else if (Array.isArray(jsonOrArray)) {
+      rawList = jsonOrArray;
+    } else if (jsonOrArray && typeof jsonOrArray === 'object' && typeof jsonOrArray.code === 'string') {
+      rawList = [jsonOrArray];
+    } else {
+      throw new Error('Import data must be a JSON string, a script object, or an array of scripts');
+    }
+  } catch (err: any) {
+    result.errors!.push(`Parse error: ${err.message || String(err)}`);
+    return result;
+  }
+
+  result.total = rawList.length;
+  const existingScripts = await getScripts();
+
+  for (let i = 0; i < rawList.length; i++) {
+    const raw = rawList[i];
+    try {
+      if (!raw || typeof raw.code !== 'string') {
+        result.failed++;
+        result.errors!.push(`Item #${i + 1} skipped: missing "code" property`);
+        continue;
+      }
+
+      const hasId = raw.id && typeof raw.id === 'string';
+      const exists = hasId && !!existingScripts[raw.id];
+
+      const itemToSave = { ...raw };
+      if (exists && !options.overwrite) {
+        itemToSave.id = undefined; // Generate new ID
+      }
+
+      if (options.autoEnable !== undefined) {
+        itemToSave.enabled = options.autoEnable;
+      }
+
+      const saved = await saveScript(itemToSave);
+      result.scripts!.push(saved);
+
+      if (exists && options.overwrite) {
+        result.updated++;
+      } else {
+        result.imported++;
+      }
+    } catch (err: any) {
+      result.failed++;
+      result.errors!.push(`Item #${i + 1} error: ${err.message || String(err)}`);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Subscribes to storage changes on the scripts collection.
+ */
+export function onScriptsChanged(
+  callback: (scripts: Record<string, ScriptRecord>) => void
+): () => void {
+  if (typeof chrome === 'undefined' || !chrome.storage?.onChanged) {
+    return () => {};
+  }
+
+  const listener = (changes: Record<string, chrome.storage.StorageChange>, areaName: string) => {
+    if (areaName === 'local' && changes[STORAGE_KEYS.SCRIPTS]) {
+      const newValue = changes[STORAGE_KEYS.SCRIPTS].newValue || {};
+      callback(deepClone(newValue));
+    }
+  };
+
+  chrome.storage.onChanged.addListener(listener);
+  return () => {
+    chrome.storage.onChanged.removeListener(listener);
+  };
 }
 
 /**

@@ -64,9 +64,9 @@ XOKJ is a Manifest V3 Chromium Userscript Manager built with Vue 3, Vite, and `@
 |---|------|-------|-------------|--------|
 | 1 | Toolchain & Metadata Parser Core | Scaffolding (`package.json`, Vite, Vitest, TS), Types, `metadata-parser.ts`, `match-pattern.ts`, storage types, and unit tests | none | DONE |
 | 2 | Hybrid CDP Engine & Conflict Manager | `TabDebuggerManager`, `CdpBridgeServer`, `DevToolsConflictHandler`, mock harness, and RPC bridge unit tests | M1 | DONE |
-| 3 | Userscript Runtime Engine & Injection Bridge | Content script bridge, `cdp-sdk.ts`, `ScriptInjector`, storage CRUD repository, and integration tests | M1, M2 | IN_PROGRESS |
-| 4 | Extension UI (Popup & Management Dashboard) | Vue 3 Popup (active scripts, toggles, CDP status/conflict banner) and Dashboard (CRUD, CodeMirror 6 editor) | M1, M2, M3 | PLANNED |
-| 5 | E2E Verification & Adversarial Hardening | Phase 1: Pass 100% E2E test suite (Tiers 1-4). Phase 2: Adversarial coverage hardening (Tier 5) | M1, M2, M3, M4 | PLANNED |
+| 3 | Userscript Runtime Engine & Injection Bridge | Content script bridge, `cdp-sdk.ts`, `ScriptInjector`, storage CRUD repository, and integration tests | M1, M2 | DONE |
+| 4 | Extension UI (Popup & Management Dashboard) | Vue 3 Popup (active scripts, toggles, CDP status/conflict banner) and Dashboard (CRUD, CodeMirror 6 editor) | M1, M2, M3 | DONE |
+| 5 | E2E Verification & Adversarial Hardening | Phase 1: Pass 100% E2E test suite (Tiers 1-4). Phase 2: Adversarial coverage hardening (Tier 5) | M1, M2, M3, M4 | DONE |
 
 ---
 

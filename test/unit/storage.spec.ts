@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setupChromeMock } from '../mocks/chrome';
 import {
   getScripts,
   getScriptList,
+  getAllScripts,
   getScript,
   saveScript,
   deleteScript,
@@ -10,6 +11,9 @@ import {
   resetToDefaultScripts,
   getSettings,
   saveSettings,
+  importScripts,
+  exportScripts,
+  onScriptsChanged,
   DEFAULT_SCRIPTS
 } from '@/shared/storage';
 import type { ScriptRecord } from '@/shared/types';
@@ -216,4 +220,143 @@ describe('Feature 6: Storage Schema & Defaults', () => {
       expect(scripts1).not.toBe(scripts2);
     });
   });
+
+  describe('Tier 4: Milestone 3 - Querying & Metadata Auto-Parsing', () => {
+    it('T4.1: getAllScripts supports filtering by enabled state', async () => {
+      await toggleScript('sample-cookie-inspector', false);
+
+      const all = await getAllScripts();
+      expect(all.length).toBe(3);
+
+      const enabledOnly = await getAllScripts({ enabled: true });
+      expect(enabledOnly.length).toBe(2);
+      expect(enabledOnly.every((s) => s.enabled)).toBe(true);
+
+      const disabledOnly = await getAllScripts({ enabled: false });
+      expect(disabledOnly.length).toBe(1);
+      expect(disabledOnly[0].id).toBe('sample-cookie-inspector');
+    });
+
+    it('T4.2: getAllScripts supports URL match filtering with exclusion precedence', async () => {
+      const matchingHttpbin = await getAllScripts({ url: 'https://httpbin.org/status/200' });
+      expect(matchingHttpbin.some((s) => s.id === 'sample-cdp-logger')).toBe(true);
+
+      const restricted = await getAllScripts({ url: 'chrome://extensions' });
+      expect(restricted.length).toBe(0);
+    });
+
+    it('T4.3: getAllScripts supports filtering by runAt and search query', async () => {
+      const docStart = await getAllScripts({ runAt: 'document-start' });
+      expect(docStart.length).toBe(1);
+      expect(docStart[0].id).toBe('sample-cdp-logger');
+
+      const searchResult = await getAllScripts({ search: 'Inspector' });
+      expect(searchResult.length).toBe(1);
+      expect(searchResult[0].id).toBe('sample-cookie-inspector');
+    });
+
+    it('T4.4: saveScript auto-parses metadata and updates updatedAt timestamp', async () => {
+      const code = `// ==UserScript==
+// @name         Auto Parsed Userscript
+// @namespace    https://xokj.dev
+// @version      2.5.0
+// @description  Tests automatic metadata parsing
+// @match        https://example.org/*
+// @run-at       document-end
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @cdp          DOM.enable
+// ==/UserScript==
+
+console.log("hello");`;
+
+      const saved = await saveScript({ code });
+      expect(saved.id).toBeDefined();
+      expect(saved.name).toBe('Auto Parsed Userscript');
+      expect(saved.metadata.name).toBe('Auto Parsed Userscript');
+      expect(saved.metadata.version).toBe('2.5.0');
+      expect(saved.metadata.runAt).toBe('document-end');
+      expect(saved.metadata.grants).toEqual(['GM_setValue', 'GM_getValue']);
+      expect(saved.metadata.cdpDomains).toEqual(['DOM']);
+      expect(saved.createdAt).toBeGreaterThan(0);
+      expect(saved.updatedAt).toBeGreaterThan(0);
+
+      // Updating code reparses metadata
+      const updatedCode = code.replace('@version      2.5.0', '@version      2.6.0');
+      const updated = await saveScript({ id: saved.id, code: updatedCode });
+      expect(updated.metadata.version).toBe('2.6.0');
+      expect(updated.updatedAt).toBeGreaterThanOrEqual(saved.updatedAt);
+    });
+  });
+
+  describe('Tier 5: Milestone 3 - Import, Export & Change Listeners', () => {
+    it('T5.1: exportScripts exports all or subset of scripts as valid JSON bundle', async () => {
+      const allExportJson = await exportScripts();
+      const allBundle = JSON.parse(allExportJson);
+      expect(allBundle.version).toBe(1);
+      expect(allBundle.generator).toBe('XOKJ Userscript Manager');
+      expect(Array.isArray(allBundle.scripts)).toBe(true);
+      expect(allBundle.scripts.length).toBe(3);
+
+      const subsetJson = await exportScripts(['sample-cdp-logger']);
+      const subsetBundle = JSON.parse(subsetJson);
+      expect(subsetBundle.scripts.length).toBe(1);
+      expect(subsetBundle.scripts[0].id).toBe('sample-cdp-logger');
+    });
+
+    it('T5.2: importScripts imports from JSON bundle and respects overwrite flag', async () => {
+      const exportJson = await exportScripts(['sample-cdp-logger']);
+      
+      // Import without overwrite: creates new script with new ID
+      const res1 = await importScripts(exportJson, { overwrite: false });
+      expect(res1.imported).toBe(1);
+      expect(res1.updated).toBe(0);
+      expect(res1.failed).toBe(0);
+
+      const allScripts = await getScriptList();
+      expect(allScripts.length).toBe(4);
+
+      // Import with overwrite: updates existing script
+      const res2 = await importScripts(exportJson, { overwrite: true });
+      expect(res2.imported).toBe(0);
+      expect(res2.updated).toBe(1);
+    });
+
+    it('T5.3: importScripts handles raw userscript header string', async () => {
+      const rawUserScript = `// ==UserScript==
+// @name         Single String Script
+// @match        *://*.single.com/*
+// @run-at       document-idle
+// ==/UserScript==
+console.log('single');`;
+
+      const res = await importScripts(rawUserScript);
+      expect(res.imported).toBe(1);
+      expect(res.scripts?.[0].name).toBe('Single String Script');
+    });
+
+    it('T5.4: onScriptsChanged receives callbacks when scripts are updated', async () => {
+      const callback = vi.fn();
+      const unsubscribe = onScriptsChanged(callback);
+
+      await saveScript({
+        id: 'listener-test-script',
+        code: '// ==UserScript==\n// @name Listener Test\n// ==/UserScript=='
+      });
+
+      expect(callback).toHaveBeenCalled();
+      expect(callback).toHaveBeenCalledWith(
+        expect.objectContaining({
+          'listener-test-script': expect.objectContaining({ name: 'Listener Test' })
+        })
+      );
+
+      unsubscribe();
+      callback.mockClear();
+
+      await deleteScript('listener-test-script');
+      expect(callback).not.toHaveBeenCalled();
+    });
+  });
 });
+

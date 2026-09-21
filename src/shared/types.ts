@@ -137,6 +137,8 @@ export interface ScriptRecord {
 export interface ScriptFilter {
   search?: string;
   enabledOnly?: boolean;
+  enabled?: boolean;
+  url?: string;
   runAt?: RunAtTiming;
   domain?: string;
 }
@@ -293,6 +295,33 @@ export interface ToggleScriptMessage {
   enabled: boolean;
 }
 
+export interface ToggleScriptResponse {
+  success: boolean;
+  enabled?: boolean;
+  error?: string;
+}
+
+export interface ToggleGlobalMessage {
+  type: 'TOGGLE_GLOBAL';
+  enabled: boolean;
+}
+
+export interface ToggleGlobalResponse {
+  success: boolean;
+  enabled?: boolean;
+  error?: string;
+}
+
+export interface GetCdpStatusMessage {
+  type: 'GET_CDP_STATUS';
+  tabId: number;
+}
+
+export interface GetCdpStatusResponse {
+  status: DebuggerSessionStatus;
+  reason?: string;
+}
+
 export interface ReconnectCdpMessage {
   type: 'RECONNECT_CDP';
   tabId: number;
@@ -308,12 +337,18 @@ export interface GetTabSessionMessage {
   tabId: number;
 }
 
+export interface GetTabSessionResponse {
+  session?: TabSessionState;
+}
+
 /**
  * Union type representing all messages routed through chrome.runtime.
  */
 export type ExtensionMessage =
   | GetActiveScriptsMessage
   | ToggleScriptMessage
+  | ToggleGlobalMessage
+  | GetCdpStatusMessage
   | ReconnectCdpMessage
   | GetTabSessionMessage
   | CdpRpcRequest
@@ -325,9 +360,8 @@ export type ExtensionMessage =
 // 7. Userscript Runtime SDK Interface
 // ---------------------------------------------------------------------------
 
-/**
- * Client-side SDK exposed to userscripts as `cdp` or `GM_cdp`.
- */
+export type CdpClientStatus = 'ATTACHED' | 'CONFLICT' | 'DETACHED' | 'IDLE';
+
 export interface CdpClient {
   /**
    * Invokes a CDP method and awaits the result asynchronously.
@@ -345,9 +379,14 @@ export interface CdpClient {
   off(event: string, handler: (params: any) => void): void;
 
   /**
+   * Checks whether the current tab's debugger session is actively attached.
+   */
+  isAttached(): Promise<boolean>;
+
+  /**
    * Queries the current CDP debugger session status for the current tab.
    */
-  getStatus(): Promise<{ attached: boolean; conflict: boolean; reason?: string }>;
+  getStatus(): Promise<CdpClientStatus>;
 }
 
 // ---------------------------------------------------------------------------
