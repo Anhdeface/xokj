@@ -51,26 +51,26 @@ function handleFaviconError() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 14px;
-  background-color: #10121a;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 5px 12px;
+  background-color: #0e1017;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
   font-size: 11px;
 }
 .tab-host {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   overflow: hidden;
   max-width: 220px;
 }
 .favicon {
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
   flex-shrink: 0;
   border-radius: 3px;
 }
 .globe-icon {
-  font-size: 11px;
+  font-size: 10px;
   color: #64748b;
 }
 .hostname {
@@ -84,29 +84,29 @@ function handleFaviconError() {
 .tab-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 .match-count-badge {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  color: #cbd5e1;
-  padding: 2px 7px;
+  color: #94a3b8;
+  padding: 1px 6px;
   border-radius: 9999px;
   font-size: 10px;
   font-weight: 500;
 }
 .reload-tab-btn {
   background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   color: #94a3b8;
-  width: 22px;
-  height: 22px;
-  border-radius: 5px;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  font-size: 10px;
+  font-size: 9px;
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .reload-tab-btn:hover {

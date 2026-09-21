@@ -4,10 +4,7 @@
       <div class="logo-icon">
         <i class="fa-solid fa-bolt"></i>
       </div>
-      <div class="brand-text">
-        <span class="title">XOKJ</span>
-        <span class="subtitle">CDP Userscript Manager</span>
-      </div>
+      <span class="title">XOKJ</span>
     </div>
     <div class="actions">
       <button
@@ -33,81 +30,62 @@ defineEmits<{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 11px 14px;
-  background: linear-gradient(180deg, #161822 0%, #12141c 100%);
+  padding: 8px 12px;
+  background: linear-gradient(180deg, #161822 0%, #10121a 100%);
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 .brand {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 7px;
 }
 .logo-icon {
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
   background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: 11px;
   color: #ffffff;
-  box-shadow: 0 2px 10px rgba(99, 102, 241, 0.4);
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.35);
+  transition: transform 0.2s ease;
 }
 .logo-icon:hover {
-  transform: rotate(6deg) scale(1.05);
-  box-shadow: 0 3px 14px rgba(99, 102, 241, 0.6);
-}
-.brand-text {
-  display: flex;
-  flex-direction: column;
+  transform: rotate(8deg) scale(1.08);
 }
 .title {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
   color: #f8fafc;
-  letter-spacing: 0.6px;
-  line-height: 1.1;
-}
-.subtitle {
-  font-size: 10px;
-  color: #94a3b8;
-  font-weight: 400;
-  letter-spacing: 0.2px;
+  letter-spacing: 0.5px;
 }
 .dashboard-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   color: #e2e8f0;
-  padding: 5px 10px;
-  border-radius: 6px;
+  padding: 4px 8px;
+  border-radius: 5px;
   font-size: 11px;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  backdrop-filter: blur(8px);
 }
 .dashboard-btn:hover {
-  background: rgba(99, 102, 241, 0.15);
+  background: rgba(99, 102, 241, 0.18);
   border-color: rgba(99, 102, 241, 0.5);
   color: #ffffff;
   transform: translateY(-1px);
-  box-shadow: 0 3px 10px rgba(99, 102, 241, 0.25);
 }
 .dashboard-btn:active {
   transform: scale(0.97);
 }
 .btn-icon {
-  font-size: 11px;
+  font-size: 10px;
   color: #818cf8;
-  transition: transform 0.2s ease;
-}
-.dashboard-btn:hover .btn-icon {
-  transform: rotate(15deg);
-  color: #a5b4fc;
 }
 </style>

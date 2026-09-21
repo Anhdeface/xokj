@@ -15,7 +15,7 @@
         <span class="label-primary">Script Engine</span>
         <span class="label-status" :class="{ 'status-off': !globalEnabled }">
           <i class="fa-solid fa-circle-dot status-icon"></i>
-          {{ globalEnabled ? 'Active' : 'Paused' }}
+          <span>{{ globalEnabled ? 'Active' : 'Paused' }}</span>
         </span>
       </div>
     </div>
@@ -50,47 +50,47 @@ defineEmits<{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 14px;
-  background-color: #141722;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 6px 12px;
+  background-color: #12141c;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 .control-left {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: 8px;
 }
 .control-label {
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  gap: 6px;
 }
 .label-primary {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
-  color: #f1f5f9;
-  letter-spacing: 0.2px;
+  color: #e2e8f0;
 }
 .label-status {
   font-size: 10px;
   color: #34d399;
   font-weight: 500;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   transition: color 0.2s ease;
 }
 .status-icon {
-  font-size: 7px;
+  font-size: 6px;
 }
 .label-status.status-off {
   color: #f87171;
 }
 
-/* Custom smooth switch */
+/* Compact smooth switch */
 .toggle-switch {
   position: relative;
   display: inline-block;
-  width: 36px;
-  height: 20px;
+  width: 30px;
+  height: 16px;
 }
 .toggle-switch input {
   opacity: 0;
@@ -102,28 +102,28 @@ defineEmits<{
   cursor: pointer;
   top: 0; left: 0; right: 0; bottom: 0;
   background-color: #334155;
-  border-radius: 20px;
+  border-radius: 16px;
   transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
 .slider:before {
   position: absolute;
   content: "";
-  height: 14px;
-  width: 14px;
-  left: 2px;
-  bottom: 2px;
+  height: 12px;
+  width: 12px;
+  left: 1px;
+  bottom: 1px;
   background-color: #ffffff;
   border-radius: 50%;
   transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 input:checked + .slider {
   background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
   border-color: rgba(99, 102, 241, 0.6);
-  box-shadow: 0 0 10px rgba(99, 102, 241, 0.4);
+  box-shadow: 0 0 8px rgba(99, 102, 241, 0.4);
 }
 input:checked + .slider:before {
-  transform: translateX(16px);
+  transform: translateX(14px);
 }
 </style>

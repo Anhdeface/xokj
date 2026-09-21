@@ -7,11 +7,6 @@
           <span v-if="script.metadata?.version" class="version-tag">
             v{{ script.metadata.version }}
           </span>
-        </div>
-        <p v-if="script.metadata?.description" class="script-desc" :title="script.metadata.description">
-          {{ script.metadata.description }}
-        </p>
-        <div class="badges-row">
           <span class="timing-badge" :class="timingClass">
             {{ timingLabel }}
           </span>
@@ -24,8 +19,18 @@
             <span>{{ grantsLabel }}</span>
           </span>
         </div>
+        <p v-if="script.metadata?.description" class="script-desc" :title="script.metadata.description">
+          {{ script.metadata.description }}
+        </p>
       </div>
       <div class="card-action">
+        <button
+          class="edit-btn"
+          title="Edit in Dashboard"
+          @click="$emit('edit', script.id)"
+        >
+          <i class="fa-solid fa-pen-to-square"></i>
+        </button>
         <label class="item-switch">
           <input
             type="checkbox"
@@ -35,13 +40,6 @@
           />
           <span class="item-slider"></span>
         </label>
-        <button
-          class="edit-btn"
-          title="Edit in Dashboard"
-          @click="$emit('edit', script.id)"
-        >
-          <i class="fa-solid fa-pen-to-square"></i>
-        </button>
       </div>
     </div>
   </div>
@@ -109,28 +107,25 @@ const grantsLabel = computed(() => {
 
 <style scoped>
 .script-card {
-  background-color: #161822;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 8px;
-  padding: 11px 13px;
-  margin: 6px 14px;
+  background-color: #151722;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 7px;
+  padding: 7px 10px;
+  margin: 3px 10px;
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 .script-card:hover {
-  background-color: #1c202d;
-  border-color: rgba(99, 102, 241, 0.35);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+  background-color: #1b1e2c;
+  border-color: rgba(99, 102, 241, 0.3);
 }
 .script-card.card-disabled {
   opacity: 0.55;
 }
 .card-main {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
 }
 .card-info {
   flex: 1;
@@ -139,48 +134,46 @@ const grantsLabel = computed(() => {
 .title-row {
   display: flex;
   align-items: center;
-  gap: 7px;
-  margin-bottom: 3px;
+  gap: 5px;
+  flex-wrap: nowrap;
+  overflow: hidden;
 }
 .script-name {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   color: #f1f5f9;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 140px;
 }
 .version-tag {
   font-size: 9px;
-  background-color: #242938;
+  background-color: #222634;
   border: 1px solid rgba(255, 255, 255, 0.06);
   color: #94a3b8;
-  padding: 1px 5px;
-  border-radius: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
   font-family: ui-monospace, monospace;
+  flex-shrink: 0;
 }
 .script-desc {
-  font-size: 11px;
-  color: #94a3b8;
-  margin: 0 0 7px 0;
+  font-size: 10px;
+  color: #64748b;
+  margin: 2px 0 0 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: 1.3;
-}
-.badges-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 5px;
+  line-height: 1.25;
 }
 .timing-badge {
-  font-size: 9px;
+  font-size: 8.5px;
   font-weight: 600;
-  padding: 1px 6px;
-  border-radius: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
   text-transform: uppercase;
   letter-spacing: 0.3px;
+  flex-shrink: 0;
 }
 .timing-start {
   background-color: rgba(6, 182, 212, 0.12);
@@ -198,41 +191,42 @@ const grantsLabel = computed(() => {
   border: 1px solid rgba(100, 116, 139, 0.35);
 }
 .cdp-badge-tag {
-  font-size: 9px;
+  font-size: 8.5px;
   font-weight: 600;
   background: rgba(99, 102, 241, 0.12);
   color: #818cf8;
   border: 1px solid rgba(99, 102, 241, 0.35);
-  padding: 1px 6px;
-  border-radius: 4px;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-.cdp-icon {
-  font-size: 8px;
-  color: #a5b4fc;
-}
-.grant-badge-tag {
-  font-size: 9px;
-  background-color: rgba(234, 179, 8, 0.1);
-  color: #fbbf24;
-  border: 1px solid rgba(234, 179, 8, 0.3);
-  padding: 1px 5px;
-  border-radius: 4px;
+  padding: 0 5px;
+  border-radius: 3px;
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  flex-shrink: 0;
+}
+.cdp-icon {
+  font-size: 7.5px;
+  color: #a5b4fc;
+}
+.grant-badge-tag {
+  font-size: 8.5px;
+  background-color: rgba(234, 179, 8, 0.1);
+  color: #fbbf24;
+  border: 1px solid rgba(234, 179, 8, 0.3);
+  padding: 0 4px;
+  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
 }
 .grant-icon {
-  font-size: 8px;
+  font-size: 7px;
 }
 .card-action {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding-top: 2px;
+  gap: 6px;
+  flex-shrink: 0;
 }
 .edit-btn {
   background: rgba(255, 255, 255, 0.04);
@@ -241,22 +235,24 @@ const grantsLabel = computed(() => {
   cursor: pointer;
   font-size: 10px;
   color: #94a3b8;
-  padding: 3px 5px;
+  padding: 2px 4px;
   transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 .edit-btn:hover {
   color: #818cf8;
   background-color: rgba(99, 102, 241, 0.15);
   border-color: rgba(99, 102, 241, 0.4);
-  transform: scale(1.08);
 }
 
 /* Item switch */
 .item-switch {
   position: relative;
   display: inline-block;
-  width: 32px;
-  height: 18px;
+  width: 28px;
+  height: 16px;
 }
 .item-switch input {
   opacity: 0;
@@ -268,7 +264,7 @@ const grantsLabel = computed(() => {
   cursor: pointer;
   top: 0; left: 0; right: 0; bottom: 0;
   background-color: #334155;
-  border-radius: 18px;
+  border-radius: 16px;
   transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
   border: 1px solid rgba(255, 255, 255, 0.06);
 }
@@ -277,8 +273,8 @@ const grantsLabel = computed(() => {
   content: "";
   height: 12px;
   width: 12px;
-  left: 2px;
-  bottom: 2px;
+  left: 1px;
+  bottom: 1px;
   background-color: white;
   border-radius: 50%;
   transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -287,10 +283,10 @@ const grantsLabel = computed(() => {
 input:checked + .item-slider {
   background: linear-gradient(135deg, #10b981 0%, #059669 100%);
   border-color: rgba(16, 185, 129, 0.5);
-  box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
 }
 input:checked + .item-slider:before {
-  transform: translateX(14px);
+  transform: translateX(12px);
 }
 input:disabled + .item-slider {
   cursor: not-allowed;
