@@ -74,12 +74,17 @@ export class CdpBridgeServer {
   private handleMessageBound = this.handleMessage.bind(this);
   private handleDebuggerEventBound = this.handleDebuggerEvent.bind(this);
   private handleDebuggerDetachBound = this.handleDebuggerDetach.bind(this);
+  private handleTabRemovedBound = this.handleTabRemoved.bind(this);
 
   constructor(options: CdpBridgeServerOptions = {}) {
     this.timeoutMs = options.timeoutMs ?? 30000;
     this.protocolVersion = options.protocolVersion ?? '1.3';
     this.autoAttach = options.autoAttach ?? true;
     this.debuggerManager = options.debuggerManager;
+
+    if (this.debuggerManager && typeof (this.debuggerManager as any).setInflightTracker === 'function') {
+      (this.debuggerManager as any).setInflightTracker(this);
+    }
 
     if (options.autoStart) {
       this.init();
@@ -95,7 +100,16 @@ export class CdpBridgeServer {
     if (typeof chrome !== 'undefined') {
       chrome.runtime?.onMessage?.addListener?.(this.handleMessageBound);
       chrome.debugger?.onEvent?.addListener?.(this.handleDebuggerEventBound);
-      chrome.debugger?.onDetach?.addListener?.(this.handleDebuggerDetachBound);
+
+      // Single Owner: Only register direct onDetach listener if running standalone without TabDebuggerManager
+      if (!this.debuggerManager && chrome.debugger?.onDetach) {
+        chrome.debugger.onDetach.addListener(this.handleDebuggerDetachBound);
+      }
+
+      // Tab destruction cleanup: prune closed tabs and reject inflight promises
+      if (chrome.tabs?.onRemoved) {
+        chrome.tabs.onRemoved.addListener(this.handleTabRemovedBound);
+      }
     }
 
     this.isListening = true;
@@ -114,7 +128,12 @@ export class CdpBridgeServer {
     if (typeof chrome !== 'undefined') {
       chrome.runtime?.onMessage?.removeListener?.(this.handleMessageBound);
       chrome.debugger?.onEvent?.removeListener?.(this.handleDebuggerEventBound);
-      chrome.debugger?.onDetach?.removeListener?.(this.handleDebuggerDetachBound);
+      if (!this.debuggerManager && chrome.debugger?.onDetach) {
+        chrome.debugger.onDetach.removeListener(this.handleDebuggerDetachBound);
+      }
+      if (chrome.tabs?.onRemoved) {
+        chrome.tabs.onRemoved.removeListener(this.handleTabRemovedBound);
+      }
     }
 
     this.isListening = false;
@@ -258,30 +277,7 @@ export class CdpBridgeServer {
       };
     }
 
-    if (this.autoAttach) {
-      try {
-        await this.ensureAttached(tabId);
-      } catch (attachErr: any) {
-        const isConflict =
-          attachErr instanceof DevToolsConflictError ||
-          attachErr?.code === 1001 ||
-          attachErr?.message?.includes('conflict') ||
-          attachErr?.message?.includes('Another debugger');
-
-        return {
-          type: 'CDP_RPC_RESPONSE',
-          id,
-          success: false,
-          error: {
-            code: isConflict ? 1001 : -32002,
-            message: attachErr?.message || `Failed to attach debugger to tab ${tabId}`,
-            data: attachErr
-          }
-        };
-      }
-    }
-
-    return new Promise<CdpRpcResponse>((resolve) => {
+    return new Promise<CdpRpcResponse>(async (resolve) => {
       const timer = setTimeout(() => {
         this.handleTimeout(id);
       }, this.timeoutMs);
@@ -296,11 +292,50 @@ export class CdpBridgeServer {
         resolve
       };
 
+      // Register into inflight and tab mapping BEFORE awaiting ensureAttached
       this.inflightRequests.set(id, entry);
       if (!this.tabRequests.has(tabId)) {
         this.tabRequests.set(tabId, new Set());
       }
       this.tabRequests.get(tabId)!.add(id);
+
+      if (this.autoAttach) {
+        try {
+          await this.ensureAttached(tabId);
+        } catch (attachErr: any) {
+          // If request was already rejected by concurrent detachment during ensureAttached, do not double-resolve
+          if (!this.inflightRequests.has(id)) {
+            return;
+          }
+
+          clearTimeout(timer);
+          this.inflightRequests.delete(id);
+          this.tabRequests.get(tabId)?.delete(id);
+
+          const isConflict =
+            attachErr instanceof DevToolsConflictError ||
+            attachErr?.code === 1001 ||
+            attachErr?.message?.includes('conflict') ||
+            attachErr?.message?.includes('Another debugger');
+
+          resolve({
+            type: 'CDP_RPC_RESPONSE',
+            id,
+            success: false,
+            error: {
+              code: isConflict ? 1001 : -32002,
+              message: attachErr?.message || `Failed to attach debugger to tab ${tabId}`,
+              data: attachErr
+            }
+          });
+          return;
+        }
+      }
+
+      // Check if this request was already cancelled / rejected while awaiting ensureAttached
+      if (!this.inflightRequests.has(id)) {
+        return;
+      }
 
       if (typeof chrome === 'undefined' || !chrome.debugger?.sendCommand) {
         clearTimeout(timer);
@@ -376,7 +411,8 @@ export class CdpBridgeServer {
       return;
     }
 
-    const lock = (async () => {
+    let lock!: Promise<void>;
+    lock = (async () => {
       try {
         if (this.debuggerManager) {
           if (this.debuggerManager.attachTab) {
@@ -392,7 +428,23 @@ export class CdpBridgeServer {
             await chrome.debugger.attach({ tabId }, this.protocolVersion);
           }
         }
-        this.attachedTabs.add(tabId);
+        // Memory leak guard: verify tab was not detached or closed while attach was suspended
+        const isStillAttached = this.debuggerManager
+          ? this.debuggerManager.isAttached(tabId)
+          : this.attachLocks.get(tabId) === lock;
+
+        if (isStillAttached) {
+          this.attachedTabs.add(tabId);
+        } else {
+          this.attachedTabs.delete(tabId);
+          if (!this.debuggerManager && typeof chrome !== 'undefined' && chrome.debugger?.detach) {
+            try {
+              await chrome.debugger.detach({ tabId });
+            } catch {
+              // Benign
+            }
+          }
+        }
       } catch (err: any) {
         const errMsg = err?.message || String(err);
         const hasAlreadyAttached = /already attached/i.test(errMsg);
@@ -442,7 +494,9 @@ export class CdpBridgeServer {
         this.attachedTabs.delete(tabId);
         throw err;
       } finally {
-        this.attachLocks.delete(tabId);
+        if (this.attachLocks.get(tabId) === lock) {
+          this.attachLocks.delete(tabId);
+        }
       }
     })();
 
@@ -455,33 +509,35 @@ export class CdpBridgeServer {
    */
   public rejectPendingRequestsForTab(tabId: number, error: Error | CdpRpcError): number {
     const requestIds = this.tabRequests.get(tabId);
-    if (!requestIds || requestIds.size === 0) return 0;
-
-    const rpcError: CdpRpcError =
-      error instanceof Error
-        ? {
-            code: (error as any).code ?? 1001,
-            message: error.message,
-            data: (error as any).reason
-          }
-        : error;
-
     let rejectedCount = 0;
-    for (const id of Array.from(requestIds)) {
-      const entry = this.inflightRequests.get(id);
-      if (entry) {
-        clearTimeout(entry.timer);
-        this.inflightRequests.delete(id);
-        entry.resolve({
-          type: 'CDP_RPC_RESPONSE',
-          id,
-          success: false,
-          error: rpcError
-        });
-        rejectedCount++;
+
+    if (requestIds && requestIds.size > 0) {
+      const rpcError: CdpRpcError =
+        error instanceof Error
+          ? {
+              code: (error as any).code ?? 1001,
+              message: error.message,
+              data: (error as any).reason
+            }
+          : error;
+
+      for (const id of Array.from(requestIds)) {
+        const entry = this.inflightRequests.get(id);
+        if (entry) {
+          clearTimeout(entry.timer);
+          this.inflightRequests.delete(id);
+          entry.resolve({
+            type: 'CDP_RPC_RESPONSE',
+            id,
+            success: false,
+            error: rpcError
+          });
+          rejectedCount++;
+        }
       }
     }
 
+    // UNCONDITIONAL CLEANUP: guarantees deallocation even when zero requests are inflight
     this.tabRequests.delete(tabId);
     this.attachedTabs.delete(tabId);
     this.attachLocks.delete(tabId);
@@ -491,6 +547,18 @@ export class CdpBridgeServer {
 
   public rejectInflightForTab(tabId: number, error: Error | CdpRpcError): number {
     return this.rejectPendingRequestsForTab(tabId, error);
+  }
+
+  /**
+   * Handles chrome.tabs.onRemoved event by draining closed tab requests and deallocating resources.
+   */
+  public handleTabRemoved(tabId: number): void {
+    const error: CdpRpcError = {
+      code: 1002,
+      message: `Tab ${tabId} was closed`,
+      data: { tabId, reason: 'target_closed' }
+    };
+    this.rejectPendingRequestsForTab(tabId, error);
   }
 
   /**

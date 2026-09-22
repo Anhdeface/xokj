@@ -522,4 +522,161 @@ describe('Feature 14: Content Script Message Bridge (bridge.ts)', () => {
       secureBridge.destroy();
     });
   });
+
+  describe('Tier 5: Normal & Unexpected Detachment Invalidation (M2)', () => {
+    it('T5.1: drains active pending window requests with code 1002 when CDP_LIFECYCLE_EVENT DETACHED arrives', async () => {
+      // Background holds request in flight
+      context.mockRuntime.sendMessage.mockImplementation(async () => {
+        return new Promise(() => {});
+      });
+
+      bridge.handlePageMessage({
+        source: window,
+        data: {
+          type: 'CDP_RPC_REQUEST',
+          id: 'pending-detach-1',
+          method: 'Page.navigate',
+          params: { url: 'https://example.com' }
+        }
+      } as any);
+
+      expect((bridge as any).pendingRequests.has('pending-detach-1')).toBe(true);
+
+      // Emit DETACHED lifecycle event from background
+      bridge.handleRuntimeMessage({
+        type: 'CDP_LIFECYCLE_EVENT',
+        tabId: 42,
+        status: 'DETACHED',
+        reason: 'target_closed'
+      });
+
+      expect(bridge.getStatus().status).toBe('DETACHED');
+      expect((bridge as any).pendingRequests.size).toBe(0);
+
+      // Assert Main World received immediate CDP_RPC_RESPONSE with code 1002
+      expect(postedToWindow).toContainEqual(
+        expect.objectContaining({
+          type: 'CDP_RPC_RESPONSE',
+          id: 'pending-detach-1',
+          success: false,
+          error: expect.objectContaining({
+            code: 1002,
+            message: expect.stringContaining('CDP session detached')
+          })
+        })
+      );
+    });
+
+    it('T5.2: immediately rejects programmatic bridge.send() with code 1002 on DETACHED lifecycle event', async () => {
+      context.mockRuntime.sendMessage.mockImplementation(async () => {
+        return new Promise(() => {});
+      });
+
+      const sendPromise = bridge.send('Runtime.evaluate', { expression: '1 + 1' });
+      expect((bridge as any).pendingRequests.size).toBe(1);
+
+      // Emit DETACHED lifecycle event
+      bridge.handleRuntimeMessage({
+        type: 'CDP_LIFECYCLE_EVENT',
+        tabId: 42,
+        status: 'DETACHED',
+        reason: 'detached'
+      });
+
+      // Promise rejects immediately with code 1002
+      await expect(sendPromise).rejects.toThrow(/CDP session detached/);
+      try {
+        await sendPromise;
+      } catch (err: any) {
+        expect(err.code).toBe(1002);
+      }
+
+      expect((bridge as any).pendingRequests.size).toBe(0);
+    });
+
+    it('T5.3: handles burst pending requests during unexpected detachment, emitting exactly one 1002 response per request', async () => {
+      context.mockRuntime.sendMessage.mockImplementation(async () => {
+        return new Promise(() => {});
+      });
+
+      const reqIds = ['burst-det-1', 'burst-det-2', 'burst-det-3', 'burst-det-4'];
+      for (const id of reqIds) {
+        bridge.handlePageMessage({
+          source: window,
+          data: {
+            source: 'xokj-userscript',
+            type: 'CDP_RPC_REQUEST',
+            id,
+            method: 'DOM.getDocument'
+          }
+        } as any);
+      }
+
+      expect((bridge as any).pendingRequests.size).toBe(4);
+
+      // Emit DETACHED lifecycle event
+      bridge.handleRuntimeMessage({
+        type: 'CDP_LIFECYCLE_EVENT',
+        tabId: 42,
+        status: 'DETACHED',
+        reason: 'target_closed'
+      });
+
+      expect((bridge as any).pendingRequests.size).toBe(0);
+
+      // Assert exactly 4 responses with code 1002
+      const rpcResponses = postedToWindow.filter(
+        (m) => m.type === 'CDP_RPC_RESPONSE' && m.error?.code === 1002
+      );
+      expect(rpcResponses.length).toBe(4);
+
+      for (const id of reqIds) {
+        const matches = rpcResponses.filter((m) => m.id === id);
+        expect(matches.length).toBe(1);
+        expect(matches[0]).toEqual(
+          expect.objectContaining({
+            source: 'xokj-bridge',
+            type: 'CDP_RPC_RESPONSE',
+            id,
+            success: false,
+            error: expect.objectContaining({
+              code: 1002,
+              message: expect.stringContaining('CDP session detached')
+            })
+          })
+        );
+      }
+
+      // Assert exactly one CDP_LIFECYCLE_EVENT with status: 'DETACHED'
+      const lifecycleEvents = postedToWindow.filter(
+        (m) => m.type === 'CDP_LIFECYCLE_EVENT' && m.status === 'DETACHED'
+      );
+      expect(lifecycleEvents.length).toBe(1);
+    });
+
+    it('T5.4: direct handleDetached call notifies lifecycle listeners and clears conflict state', () => {
+      const lifecycleSpy = vi.fn();
+      bridge.onLifecycle(lifecycleSpy);
+
+      // Put bridge into conflict first
+      bridge.handleConflict('canceled_by_user');
+      expect(bridge.getStatus().conflict).toBe(true);
+
+      // Call handleDetached
+      bridge.handleDetached('target_closed');
+
+      const status = bridge.getStatus();
+      expect(status.status).toBe('DETACHED');
+      expect(status.conflict).toBe(false);
+      expect(status.reason).toBeUndefined();
+
+      expect(lifecycleSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'CDP_LIFECYCLE_EVENT',
+          status: 'DETACHED',
+          reason: 'target_closed'
+        })
+      );
+    });
+  });
 });

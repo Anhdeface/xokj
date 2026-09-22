@@ -75,6 +75,73 @@ describe('Feature 7 & 8: Chrome Debugger Session Manager & Declarative Init', ()
       expect(context.mockDebugger.attach).toHaveBeenCalledTimes(1);
       expect(manager.getTabStatus(42)).toBe('ATTACHED');
     });
+
+    it('T1.6: rapid attach immediately followed by detach results in DETACHED without zombie attachment', async () => {
+      let resolveAttach: () => void;
+      // Simulate chrome.debugger.attach with asynchronous delay
+      context.mockDebugger.attach.mockImplementationOnce(
+        () =>
+          new Promise<void>((res) => {
+            resolveAttach = res;
+          })
+      );
+
+      // 1. Initiate attach
+      const attachPromise = manager.attachTab(42);
+      expect(manager.getTabStatus(42)).toBe('ATTACHING');
+
+      // 2. Immediately initiate detach while attach is still in-flight
+      const detachPromise = manager.detachTab(42);
+
+      // Wait until attach reaches chrome.debugger.attach
+      await vi.waitFor(() => {
+        expect(context.mockDebugger.attach).toHaveBeenCalled();
+      });
+
+      // 3. Resolve the delayed attach
+      resolveAttach!();
+
+      // 4. Await both promises settling
+      await Promise.all([attachPromise.catch(() => {}), detachPromise]);
+
+      // 5. Verification: Tab MUST end in DETACHED state, NOT ATTACHED
+      expect(manager.getTabStatus(42)).toBe('DETACHED');
+      expect(manager.isAttached(42)).toBe(false);
+      expect(context.mockDebugger.detach).toHaveBeenCalledWith({ tabId: 42 });
+
+      const session = manager.getSession(42);
+      expect(session?.status).toBe('DETACHED');
+      expect(session?.attached).toBe(false);
+    });
+
+    it('T1.7: calling detachTab followed by attachTab reliably leaves the tab in ATTACHED state', async () => {
+      await manager.attachTab(42);
+      expect(manager.getTabStatus(42)).toBe('ATTACHED');
+      expect(context.mockDebugger.attach).toHaveBeenCalledTimes(1);
+
+      let resolveDetach: () => void;
+      context.mockDebugger.detach.mockImplementationOnce(
+        () =>
+          new Promise<void>((res) => {
+            resolveDetach = res;
+          })
+      );
+
+      const detachPromise = manager.detachTab(42);
+      await vi.waitFor(() => {
+        expect(context.mockDebugger.detach).toHaveBeenCalledTimes(1);
+      });
+
+      const attachPromise = manager.attachTab(42);
+
+      resolveDetach!();
+      await detachPromise;
+      await attachPromise;
+
+      expect(manager.getTabStatus(42)).toBe('ATTACHED');
+      expect(manager.isAttached(42)).toBe(true);
+      expect(context.mockDebugger.attach).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('Tier 2: Error Handling & Restricted Targets', () => {
@@ -143,6 +210,141 @@ describe('Feature 7 & 8: Chrome Debugger Session Manager & Declarative Init', ()
       await expect(manager.attachTab(42)).rejects.toThrow(DevToolsConflictError);
       expect(manager.getTabStatus(42)).toBe('CONFLICT');
       expect(manager.isAttached(42)).toBe(false);
+    });
+
+    it('T2.8: handleTabRemoved followed by debugger.onDetach(target_closed) does not resurrect tab in memory or storage', async () => {
+      // 1. Tab 42 attached and populated in session and storage
+      await manager.attachTab(42);
+      expect(manager.getTabStatus(42)).toBe('ATTACHED');
+      expect(manager.getSession(42)).toBeDefined();
+
+      const sessionStored = await context.sessionStorage.get('tab_session_42');
+      expect(sessionStored.tab_session_42?.status).toBe('ATTACHED');
+
+      // 2. Tab closed by user (tabs.onRemoved)
+      await manager.handleTabRemoved(42);
+
+      // Memory purged
+      expect(manager.getSession(42)).toBeUndefined();
+      expect(manager.getTabStatus(42)).toBe('IDLE');
+
+      // 3. Browser fires onDetach('target_closed') AFTER tab was removed
+      context.mockDebugger._emitDetach({ tabId: 42 }, 'target_closed');
+
+      // Explicitly check setTabStatus call does not recreate session for removed tab
+      manager.setTabStatus(42, 'DETACHED', 'target_closed');
+
+      // 4. Verify tab 42 remains dead in memory
+      expect(manager.getSession(42)).toBeUndefined();
+      expect(manager.getTabStatus(42)).toBe('IDLE');
+      expect(manager.getAllSessions().some((s) => s.tabId === 42)).toBe(false);
+
+      // 5. Verify tab 42 is NOT recreated in storage
+      const sessionAfter = await context.sessionStorage.get('tab_session_42');
+      expect(sessionAfter.tab_session_42).toBeUndefined();
+
+      const localAfter = await context.localStorage.get('tab_sessions');
+      expect(localAfter.tab_sessions?.[42]).toBeUndefined();
+    });
+
+    it('T2.9: closed tabs are cleanly pruned from chrome.storage.local.tab_sessions and session storage', async () => {
+      // 1. Attach tab 10 and tab 20
+      await manager.attachTab(10);
+      await manager.attachTab(20);
+
+      // Verify both tabs stored in chrome.storage.local.tab_sessions
+      const localInitial = await context.localStorage.get('tab_sessions');
+      expect(localInitial.tab_sessions?.[10]).toBeDefined();
+      expect(localInitial.tab_sessions?.[20]).toBeDefined();
+
+      // 2. Close tab 10
+      await manager.handleTabRemoved(10);
+
+      // Assert tab 10 is purged from chrome.storage.local while tab 20 remains
+      await vi.waitFor(async () => {
+        const localUpdated = await context.localStorage.get('tab_sessions');
+        expect(localUpdated.tab_sessions?.[10]).toBeUndefined();
+        expect(localUpdated.tab_sessions?.[20]).toBeDefined();
+      });
+
+      // Assert tab 10 is purged from chrome.storage.session
+      const sessionTab10 = await context.sessionStorage.get('tab_session_10');
+      expect(sessionTab10.tab_session_10).toBeUndefined();
+
+      const sessionTab20 = await context.sessionStorage.get('tab_session_20');
+      expect(sessionTab20.tab_session_20).toBeDefined();
+
+      // 3. Close tab 20
+      await manager.handleTabRemoved(20);
+
+      await vi.waitFor(async () => {
+        const localFinal = await context.localStorage.get('tab_sessions');
+        expect(localFinal.tab_sessions?.[20]).toBeUndefined();
+      });
+    });
+
+    it('T2.10: declarative init aborts remaining commands if tab detaches during execution', async () => {
+      const script: ScriptRecord = {
+        id: 'abort-decl-script',
+        name: 'Abort Script',
+        code: '// ==UserScript==\n// @match https://example.com/*\n// @cdp Network\n// @cdp Page\n// @cdp Fetch\n// ==/UserScript==',
+        metadata: {
+          name: 'Abort Script',
+          matches: ['https://example.com/*'],
+          matchPatterns: ['https://example.com/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: ['GM_cdp'],
+          cdp: [
+            { domain: 'Network', method: 'enable', command: 'Network.enable', params: {} },
+            { domain: 'Page', method: 'enable', command: 'Page.enable', params: {} },
+            { domain: 'Fetch', method: 'enable', command: 'Fetch.enable', params: {} }
+          ],
+          cdpDeclarations: [
+            { domain: 'Network', method: 'enable', command: 'Network.enable', params: {} },
+            { domain: 'Page', method: 'enable', command: 'Page.enable', params: {} },
+            { domain: 'Fetch', method: 'enable', command: 'Fetch.enable', params: {} }
+          ],
+          cdpDomains: ['Network', 'Page', 'Fetch'],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await saveScript(script);
+
+      // On the first command (Network.enable), trigger a detachment
+      context.mockDebugger.sendCommand.mockImplementation(async (_target, cmd) => {
+        if (cmd === 'Network.enable') {
+          context.mockDebugger._emitDetach({ tabId: 42 }, 'canceled_by_user');
+        }
+        return {};
+      });
+
+      await manager.executeDeclarativeInit(42, 'https://example.com/app');
+
+      // Network was called, but Page and Fetch should NOT be called because session detached
+      expect(context.mockDebugger.sendCommand).toHaveBeenCalledWith(
+        { tabId: 42 },
+        'Network.enable',
+        {}
+      );
+      expect(context.mockDebugger.sendCommand).not.toHaveBeenCalledWith(
+        { tabId: 42 },
+        'Page.enable',
+        {}
+      );
+      expect(context.mockDebugger.sendCommand).not.toHaveBeenCalledWith(
+        { tabId: 42 },
+        'Fetch.enable',
+        {}
+      );
     });
   });
 

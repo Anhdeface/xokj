@@ -20,6 +20,9 @@ export const cdpBridge = new CdpBridgeServer({
   autoAttach: true
 });
 
+// Complete single-owner detach architecture: route detach command rejection to bridge
+debuggerMgr.setInflightTracker(cdpBridge);
+
 // 3. Initialize DevTools conflict handler wired to bridge and debugger manager
 export const conflictHandler = new DevToolsConflictHandler(cdpBridge, debuggerMgr);
 

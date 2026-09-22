@@ -44,6 +44,10 @@ export class DevToolsConflictHandler {
   ) {
     if (inflightTracker) this.inflightTracker = inflightTracker;
     if (debuggerController) this.debuggerController = debuggerController;
+
+    if (debuggerController && inflightTracker && typeof (debuggerController as any).setInflightTracker === 'function') {
+      (debuggerController as any).setInflightTracker(inflightTracker);
+    }
   }
 
   /**
@@ -51,6 +55,9 @@ export class DevToolsConflictHandler {
    */
   public setInflightTracker(tracker: InflightCommandTracker): void {
     this.inflightTracker = tracker;
+    if (this.debuggerController && typeof (this.debuggerController as any).setInflightTracker === 'function') {
+      (this.debuggerController as any).setInflightTracker(tracker);
+    }
   }
 
   /**
@@ -58,6 +65,9 @@ export class DevToolsConflictHandler {
    */
   public setDebuggerController(controller: TabDebuggerSessionController): void {
     this.debuggerController = controller;
+    if (this.inflightTracker && typeof (controller as any).setInflightTracker === 'function') {
+      (controller as any).setInflightTracker(this.inflightTracker);
+    }
   }
 
   /**
@@ -67,7 +77,9 @@ export class DevToolsConflictHandler {
     if (this.isListening) return;
 
     if (typeof chrome !== 'undefined') {
-      if (chrome.debugger?.onDetach) {
+      // Single Owner: When debuggerController is present, TabDebuggerManager is the sole
+      // listener for chrome.debugger.onDetach. Only attach directly in standalone fallback mode.
+      if (!this.debuggerController && chrome.debugger?.onDetach) {
         chrome.debugger.onDetach.addListener(this.handleDetachBound);
       }
       if (chrome.runtime?.onMessage) {
@@ -89,7 +101,7 @@ export class DevToolsConflictHandler {
     if (!this.isListening) return;
 
     if (typeof chrome !== 'undefined') {
-      if (chrome.debugger?.onDetach) {
+      if (!this.debuggerController && chrome.debugger?.onDetach) {
         chrome.debugger.onDetach.removeListener(this.handleDetachBound);
       }
       if (chrome.runtime?.onMessage) {

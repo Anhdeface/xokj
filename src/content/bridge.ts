@@ -516,7 +516,13 @@ export class ContentScriptBridge {
       return;
     }
 
-    // Relay to Main World
+    // If transitioning into DETACHED, immediately drain all inflight promises with code 1002
+    if (this.status === 'DETACHED') {
+      this.handleDetached(event.reason || 'detached');
+      return;
+    }
+
+    // Relay to Main World (e.g. ATTACHED)
     this.postToWindow({
       source: 'xokj-bridge',
       channelId: this.channelId,
@@ -528,6 +534,45 @@ export class ContentScriptBridge {
 
     // Notify local lifecycle listeners
     this.notifyLifecycleListeners(event.status, event.reason);
+  }
+
+  /**
+   * Immediately drains all active pending requests with code 1002 (CDP session detached).
+   */
+  public handleDetached(reason: string = 'detached'): void {
+    this.status = 'DETACHED';
+    this.conflictReason = undefined;
+
+    const message =
+      reason && reason !== 'detached'
+        ? `CDP session detached: ${reason}`
+        : 'CDP session detached';
+
+    for (const [id, entry] of this.pendingRequests.entries()) {
+      clearTimeout(entry.timer);
+      this.pendingRequests.delete(id);
+
+      const detachedErr: any = new Error(message);
+      detachedErr.code = 1002;
+      detachedErr.data = { reason };
+
+      // entry.reject handles window response posting if entry.originatesFromWindow is true,
+      // or promise rejection if entry was initiated via bridge.send().
+      entry.reject(detachedErr);
+    }
+
+    // Broadcast CDP_LIFECYCLE_EVENT to Page Main World
+    this.postToWindow({
+      source: 'xokj-bridge',
+      channelId: this.channelId,
+      type: 'CDP_LIFECYCLE_EVENT',
+      tabId: this.tabId ?? 0,
+      status: 'DETACHED',
+      reason
+    });
+
+    // Notify internal lifecycle listeners
+    this.notifyLifecycleListeners('DETACHED', reason);
   }
 
   /**

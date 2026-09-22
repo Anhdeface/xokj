@@ -313,6 +313,91 @@ describe('Feature 9 & 10: Asynchronous CDP RPC Bridge & Event Dispatcher', () =>
       wiredServer.destroy();
       manager.destroy();
     });
+
+    it('T2.9: detachment with zero inflight requests cleanly removes tab from attachedTabs, tabRequests, and attachLocks', async () => {
+      // 1. Setup attached state for tab 42 with zero in-flight requests
+      (server as any).attachedTabs.add(42);
+      (server as any).tabRequests.set(42, new Set());
+      (server as any).attachLocks.set(42, Promise.resolve());
+
+      expect(server.isTabAttached(42)).toBe(true);
+      expect((server as any).tabRequests.get(42)?.size).toBe(0);
+
+      // 2. Trigger detachment with zero requests in flight
+      const rejectedCount = server.rejectPendingRequestsForTab(
+        42,
+        new Error('Debugger detached from tab: target_closed')
+      );
+
+      // 3. Assertions
+      expect(rejectedCount).toBe(0);
+      expect(server.isTabAttached(42)).toBe(false);
+      expect((server as any).attachedTabs.has(42)).toBe(false);
+      expect((server as any).tabRequests.has(42)).toBe(false);
+      expect((server as any).attachLocks.has(42)).toBe(false);
+    });
+
+    it('T2.10: chrome.debugger.onDetach with zero inflight requests cleans up attachedTabs without leaks', async () => {
+      (server as any).attachedTabs.add(77);
+      expect(server.isTabAttached(77)).toBe(true);
+
+      // Simulate chrome.debugger.onDetach event from browser
+      context.mockDebugger._emitDetach({ tabId: 77 }, 'canceled_by_user');
+
+      expect(server.isTabAttached(77)).toBe(false);
+      expect((server as any).attachedTabs.has(77)).toBe(false);
+      expect((server as any).tabRequests.has(77)).toBe(false);
+      expect((server as any).attachLocks.has(77)).toBe(false);
+    });
+
+    it('T2.11: rejects pending requests with code 1002 and cleans up state on chrome.tabs.onRemoved', async () => {
+      const standalone = new CdpBridgeServer({ autoAttach: false });
+      standalone.init();
+      standalone.markTabAttached(42);
+
+      context.mockDebugger.sendCommand.mockImplementationOnce(() => new Promise(() => {})); // hangs
+
+      const cmdPromise = standalone.executeCommand(42, 'Page.reload');
+
+      // Tab 42 closed by user
+      context.mockTabs._emitRemoved(42);
+
+      const response = await cmdPromise;
+      expect(response.success).toBe(false);
+      expect(response.error?.code).toBe(1002);
+      expect(response.error?.message).toContain('closed');
+      expect(standalone.isTabAttached(42)).toBe(false);
+      expect(standalone.getPendingRequestCount(42)).toBe(0);
+      standalone.destroy();
+    });
+
+    it('T2.12: immediately rejects command when detachment occurs while ensureAttached is pending', async () => {
+      const autoServer = new CdpBridgeServer({ autoAttach: true });
+      autoServer.init();
+
+      let resolveAttach: () => void;
+      context.mockDebugger.attach.mockImplementationOnce(
+        () => new Promise<void>((resolve) => { resolveAttach = resolve; })
+      );
+
+      const cmdPromise = autoServer.executeCommand(55, 'Runtime.evaluate', { expression: '1+1' });
+
+      // Detachment occurs while attach is still in flight
+      autoServer.rejectPendingRequestsForTab(55, {
+        code: 1001,
+        message: 'DevTools conflict: native developer tools opened on tab'
+      });
+
+      // Finish attach afterwards
+      resolveAttach!();
+
+      const response = await cmdPromise;
+      expect(response.success).toBe(false);
+      expect(response.error?.code).toBe(1001);
+      expect(response.error?.message).toContain('DevTools conflict');
+      expect(context.mockDebugger.sendCommand).not.toHaveBeenCalled();
+      autoServer.destroy();
+    });
   });
 
   describe('Tier 3: CDP Event Multiplexing & Dispatch', () => {

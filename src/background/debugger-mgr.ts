@@ -13,7 +13,7 @@ import {
   ReconnectCdpResponse
 } from '@/shared/types';
 import { isRestrictedUrl, matchesAny } from '@/shared/match-pattern';
-import { getScriptList, getSettings } from '@/shared/storage';
+import { getScriptList, getSettings, storageMutex } from '@/shared/storage';
 
 export interface TabSessionInternal {
   tabId: number;
@@ -25,8 +25,14 @@ export interface TabSessionInternal {
   conflictReason?: string;
   lastError?: string;
   updatedAt: number;
-  attachLock: Promise<void> | null;
+  operationLock: Promise<void> | null;
+  currentOp?: 'attach' | 'detach' | null;
   targetUrl?: string;
+}
+
+export interface InflightRequestTracker {
+  rejectPendingRequestsForTab?(tabId: number, error: any): number;
+  rejectInflightForTab?(tabId: number, error: any): number;
 }
 
 export type LifecycleListener = (event: CdpRpcLifecycleMessage) => void;
@@ -70,11 +76,19 @@ export function aggregateCdpDeclarations(scripts: ScriptRecord[]): CdpDeclaratio
 export class TabDebuggerManager {
   private sessions = new Map<number, TabSessionInternal>();
   private lifecycleListeners = new Set<LifecycleListener>();
+  private inflightTracker: InflightRequestTracker | null = null;
   private initialized = false;
 
   private onBeforeNavigateBound = this.handleNavigation.bind(this);
   private onDetachBound = this.handleDetach.bind(this);
   private onTabRemovedBound = this.handleTabRemoved.bind(this);
+
+  /**
+   * Binds an inflight command tracker (CdpBridgeServer) for single-owner detach rejection.
+   */
+  public setInflightTracker(tracker: InflightRequestTracker): void {
+    this.inflightTracker = tracker;
+  }
 
   /**
    * Initializes background listeners and rehydrates tab sessions.
@@ -130,7 +144,8 @@ export class TabDebuggerManager {
       activeDomains: new Set<string>(),
       conflictDetected: false,
       updatedAt: Date.now(),
-      attachLock: null
+      operationLock: null,
+      currentOp: null
     };
     this.sessions.set(tabId, session);
     return session;
@@ -203,12 +218,13 @@ export class TabDebuggerManager {
       session = this.createSession(tabId);
     }
 
-    if (session.status === 'ATTACHED') {
+    // 1. Fast check if already attached and no operation in flight
+    if (session.status === 'ATTACHED' && !session.operationLock) {
       return;
     }
 
-    // CONFLICT Guard: If in CONFLICT and not explicit force/reconnect, fast-reject with 1001
-    if (session.status === 'CONFLICT' && !actualForce) {
+    // 2. CONFLICT Guard: If in CONFLICT and not explicit force/reconnect, fast-reject with 1001
+    if (session.status === 'CONFLICT' && !session.operationLock && !actualForce) {
       throw new DevToolsConflictError(
         tabId,
         session.conflictReason || 'canceled_by_user',
@@ -216,85 +232,135 @@ export class TabDebuggerManager {
       );
     }
 
-    if (session.attachLock) {
-      await session.attachLock;
-      return;
+    // 3. Coalesce with ongoing attachTab call ONLY IF already ATTACHING, attach is current op, and not a forced attach
+    if (
+      session.status === 'ATTACHING' &&
+      session.currentOp === 'attach' &&
+      session.operationLock &&
+      !actualForce
+    ) {
+      await session.operationLock;
+      if ((session.status as DebuggerSessionStatus) === 'ATTACHED') {
+        return;
+      }
     }
 
-    session.status = 'ATTACHING';
-
-    const attachAction = async () => {
-      let targetUrl = url || session.targetUrl;
-      if (!targetUrl && typeof chrome !== 'undefined' && chrome.tabs?.get) {
-        try {
-          const tab = await chrome.tabs.get(tabId);
-          if (tab?.url) {
-            targetUrl = tab.url;
-            session.targetUrl = targetUrl;
-          }
-        } catch {
-          // Ignore
-        }
-      }
-
-      if (targetUrl && !isAttachableTarget(targetUrl)) {
-        session.status = 'DETACHED';
-        session.attached = false;
-        session.lastError = `Cannot attach to restricted target URL: ${targetUrl}`;
-        await this.persistSession(session);
-        throw new Error(`Cannot attach to restricted target URL: ${targetUrl}`);
-      }
-
-      try {
-        if (typeof chrome === 'undefined' || !chrome.debugger) {
-          throw new Error('chrome.debugger API is unavailable');
-        }
-
-        await chrome.debugger.attach({ tabId }, actualVersion);
-
-        session.status = 'ATTACHED';
-        session.attached = true;
-        session.attachedAt = Date.now();
-        session.conflictDetected = false;
-        session.conflictReason = undefined;
-        session.lastError = undefined;
-        session.updatedAt = Date.now();
-
-        await this.persistSession(session);
-        this.broadcastLifecycle(tabId, 'ATTACHED');
-      } catch (err: any) {
-        const errorMsg = err?.message || String(err);
-        if (
-          errorMsg.includes('Another debugger is already attached') ||
-          errorMsg.includes('DevTools') ||
-          errorMsg.includes('attached to the tab')
-        ) {
-          session.status = 'CONFLICT';
-          session.attached = false;
-          session.conflictDetected = true;
-          session.conflictReason = errorMsg;
-          session.updatedAt = Date.now();
-          await this.persistSession(session);
-          this.broadcastLifecycle(tabId, 'CONFLICT', errorMsg);
-          throw new DevToolsConflictError(tabId, 'canceled_by_user', errorMsg);
-        } else {
-          session.status = 'DETACHED';
-          session.attached = false;
-          session.lastError = errorMsg;
-          session.updatedAt = Date.now();
-          await this.persistSession(session);
-          throw err;
-        }
-      }
-    };
-
-    const lockPromise = attachAction();
-    session.attachLock = lockPromise;
+    // 4. Chain onto operationLock in FIFO order to prevent race conditions & execution order inversion
+    const prevLock = session.operationLock;
+    let releaseLock!: () => void;
+    const attachLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    session.operationLock = attachLock;
+    session.currentOp = 'attach';
 
     try {
-      await lockPromise;
+      if (prevLock) {
+        try {
+          await prevLock;
+        } catch {
+          // Rejection in prior operation should not prevent next operation
+        }
+      }
+
+      // Re-check state after prior lock settles
+      if ((session.status as DebuggerSessionStatus) === 'ATTACHED') {
+        return;
+      }
+      if ((session.status as DebuggerSessionStatus) === 'CONFLICT' && !actualForce) {
+        throw new DevToolsConflictError(
+          tabId,
+          session.conflictReason || 'canceled_by_user',
+          `Cannot attach to tab ${tabId}: native DevTools conflict active (session status CONFLICT)`
+        );
+      }
+
+      session.status = 'ATTACHING';
+
+      const attachAction = async () => {
+        let targetUrl = url || session.targetUrl;
+        if (!targetUrl && typeof chrome !== 'undefined' && chrome.tabs?.get) {
+          try {
+            const tab = await chrome.tabs.get(tabId);
+            if (tab?.url) {
+              targetUrl = tab.url;
+              session.targetUrl = targetUrl;
+            }
+          } catch {
+            // Ignore
+          }
+        }
+
+        if (targetUrl && !isAttachableTarget(targetUrl)) {
+          session.status = 'DETACHED';
+          session.attached = false;
+          session.lastError = `Cannot attach to restricted target URL: ${targetUrl}`;
+          await this.persistSession(session);
+          throw new Error(`Cannot attach to restricted target URL: ${targetUrl}`);
+        }
+
+        try {
+          if (typeof chrome === 'undefined' || !chrome.debugger) {
+            throw new Error('chrome.debugger API is unavailable');
+          }
+
+          await chrome.debugger.attach({ tabId }, actualVersion);
+
+          // Closed tab guard: verify tab was not removed or detached while attach was suspended
+          if (!this.sessions.has(tabId) || session.status === 'DETACHED') {
+            try {
+              if (typeof chrome !== 'undefined' && chrome.debugger) {
+                await chrome.debugger.detach({ tabId });
+              }
+            } catch {
+              // Benign
+            }
+            return;
+          }
+
+          session.status = 'ATTACHED';
+          session.attached = true;
+          session.attachedAt = Date.now();
+          session.conflictDetected = false;
+          session.conflictReason = undefined;
+          session.lastError = undefined;
+          session.updatedAt = Date.now();
+
+          await this.persistSession(session);
+          this.broadcastLifecycle(tabId, 'ATTACHED');
+        } catch (err: any) {
+          const errorMsg = err?.message || String(err);
+          if (
+            errorMsg.includes('Another debugger is already attached') ||
+            errorMsg.includes('DevTools') ||
+            errorMsg.includes('attached to the tab')
+          ) {
+            session.status = 'CONFLICT';
+            session.attached = false;
+            session.conflictDetected = true;
+            session.conflictReason = errorMsg;
+            session.updatedAt = Date.now();
+            await this.persistSession(session);
+            this.broadcastLifecycle(tabId, 'CONFLICT', errorMsg);
+            throw new DevToolsConflictError(tabId, 'canceled_by_user', errorMsg);
+          } else {
+            session.status = 'DETACHED';
+            session.attached = false;
+            session.lastError = errorMsg;
+            session.updatedAt = Date.now();
+            await this.persistSession(session);
+            throw err;
+          }
+        }
+      };
+
+      await attachAction();
     } finally {
-      session.attachLock = null;
+      releaseLock();
+      if (session.operationLock === attachLock) {
+        session.operationLock = null;
+        session.currentOp = null;
+      }
     }
   }
 
@@ -312,19 +378,83 @@ export class TabDebuggerManager {
     const session = this.sessions.get(tabId);
     if (!session) return;
 
-    try {
-      if (typeof chrome !== 'undefined' && chrome.debugger) {
-        await chrome.debugger.detach({ tabId });
+    // Fast check: already detached and no operation in flight
+    if (session.status === 'DETACHED' && !session.operationLock) {
+      return;
+    }
+
+    // If another detach is already in progress, coalesce onto it
+    if (session.operationLock && session.currentOp === 'detach') {
+      try {
+        await session.operationLock;
+      } catch {
+        // Non-fatal
       }
-    } catch {
-      // Benign if tab already detached or closed
+      return;
+    }
+
+    // Chain onto operationLock in FIFO order
+    const prevLock = session.operationLock;
+    let releaseLock!: () => void;
+    const detachLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    session.operationLock = detachLock;
+    session.currentOp = 'detach';
+
+    try {
+      if (prevLock) {
+        try {
+          await prevLock;
+        } catch {
+          // Non-fatal: even if attach failed, detach cleanup must proceed
+        }
+      }
+
+      // Re-check: if already detached after prior lock settles, return without duplicate detach call
+      if (session.status === 'DETACHED') {
+        return;
+      }
+
+      const detachAction = async () => {
+        try {
+          if (typeof chrome !== 'undefined' && chrome.debugger) {
+            await chrome.debugger.detach({ tabId });
+          }
+        } catch {
+          // Benign if tab already detached or closed
+        } finally {
+          session.status = 'DETACHED';
+          session.attached = false;
+          session.activeDomains.clear();
+          session.updatedAt = Date.now();
+
+          // Programmatic detach rejection: cleanly reject pending inflight requests immediately
+          if (this.inflightTracker) {
+            const error = {
+              code: 1002,
+              message: `Debugger detached from tab: detached`,
+              data: { reason: 'detached' }
+            };
+            if (typeof this.inflightTracker.rejectPendingRequestsForTab === 'function') {
+              this.inflightTracker.rejectPendingRequestsForTab(tabId, error);
+            } else if (typeof this.inflightTracker.rejectInflightForTab === 'function') {
+              this.inflightTracker.rejectInflightForTab(tabId, error as any);
+            }
+          }
+
+          await this.persistSession(session);
+          this.broadcastLifecycle(tabId, 'DETACHED');
+        }
+      };
+
+      await detachAction();
     } finally {
-      session.status = 'DETACHED';
-      session.attached = false;
-      session.activeDomains.clear();
-      session.updatedAt = Date.now();
-      await this.persistSession(session);
-      this.broadcastLifecycle(tabId, 'DETACHED');
+      releaseLock();
+      if (session.operationLock === detachLock) {
+        session.operationLock = null;
+        session.currentOp = null;
+      }
     }
   }
 
@@ -474,14 +604,25 @@ export class TabDebuggerManager {
     if (!attached) return;
 
     const session = this.sessions.get(tabId);
-    if (!session) return;
+    if (!session || !this.sessions.has(tabId) || session.status !== 'ATTACHED') return;
 
     for (const decl of declarations) {
+      if (!this.sessions.has(tabId) || session.status !== 'ATTACHED') {
+        break;
+      }
+
       try {
         await chrome.debugger.sendCommand({ tabId }, decl.command, decl.params || {});
         session.activeDomains.add(decl.domain);
       } catch (err) {
         console.warn(`[TabDebuggerManager] Declarative command ${decl.command} failed on tab ${tabId}:`, err);
+        if (!this.sessions.has(tabId) || session.status !== 'ATTACHED') {
+          break;
+        }
+      }
+
+      if (!this.sessions.has(tabId) || session.status !== 'ATTACHED') {
+        break;
       }
     }
   }
@@ -498,20 +639,41 @@ export class TabDebuggerManager {
 
     const isConflict = reason === 'canceled_by_user' || reason === 'replaced_with_devtools';
 
+    // 1. Instantly reject inflight CDP commands for this tab
+    if (this.inflightTracker) {
+      const error = isConflict
+        ? {
+            code: 1001,
+            message: 'DevTools conflict: native developer tools opened on tab',
+            data: { reason }
+          }
+        : {
+            code: 1002,
+            message: `Debugger detached from tab: ${reason}`,
+            data: { reason }
+          };
+
+      if (typeof this.inflightTracker.rejectPendingRequestsForTab === 'function') {
+        this.inflightTracker.rejectPendingRequestsForTab(tabId, error);
+      } else if (typeof this.inflightTracker.rejectInflightForTab === 'function') {
+        this.inflightTracker.rejectInflightForTab(tabId, error as any);
+      }
+    }
+
     if (isConflict) {
       session.status = 'CONFLICT';
       session.attached = false;
       session.conflictDetected = true;
       session.conflictReason = reason;
       session.updatedAt = Date.now();
-      this.persistSession(session);
+      this.persistSession(session).catch(() => {});
       this.broadcastLifecycle(tabId, 'CONFLICT', reason);
     } else {
       session.status = 'DETACHED';
       session.attached = false;
       session.activeDomains.clear();
       session.updatedAt = Date.now();
-      this.persistSession(session);
+      this.persistSession(session).catch(() => {});
       this.broadcastLifecycle(tabId, 'DETACHED', reason);
     }
   }
@@ -519,10 +681,33 @@ export class TabDebuggerManager {
   /**
    * Handles chrome.tabs.onRemoved events, cleaning up tab sessions.
    */
-  handleTabRemoved(tabId: number): void {
+  async handleTabRemoved(tabId: number): Promise<void> {
+    const session = this.sessions.get(tabId);
+    if (session) {
+      session.status = 'DETACHED';
+      session.attached = false;
+      session.activeDomains.clear();
+      session.updatedAt = Date.now();
+    }
     this.sessions.delete(tabId);
+
     if (typeof chrome !== 'undefined') {
       chrome.storage?.session?.remove?.([`tab_session_${tabId}`]).catch?.(() => {});
+
+      if (chrome.storage?.local?.get && chrome.storage?.local?.set) {
+        try {
+          await storageMutex.runExclusive(async () => {
+            const stored = await chrome.storage.local.get('tab_sessions');
+            if (stored?.tab_sessions && stored.tab_sessions[tabId] !== undefined) {
+              const updated = { ...stored.tab_sessions };
+              delete updated[tabId];
+              await chrome.storage.local.set({ tab_sessions: updated });
+            }
+          });
+        } catch {
+          // Non-fatal
+        }
+      }
     }
   }
 
@@ -553,6 +738,10 @@ export class TabDebuggerManager {
    * Persists session snapshot to chrome.storage.session and chrome.storage.local.
    */
   private async persistSession(session: TabSessionInternal): Promise<void> {
+    if (!this.sessions.has(session.tabId)) {
+      return;
+    }
+
     const snapshot: TabSessionState = {
       tabId: session.tabId,
       status: session.status,
@@ -578,10 +767,13 @@ export class TabDebuggerManager {
 
       if (chrome.storage?.local?.get && chrome.storage?.local?.set) {
         try {
-          const stored = await chrome.storage.local.get('tab_sessions');
-          const sessions = stored.tab_sessions || {};
-          sessions[session.tabId] = snapshot;
-          await chrome.storage.local.set({ tab_sessions: sessions });
+          await storageMutex.runExclusive(async () => {
+            if (!this.sessions.has(session.tabId)) return;
+            const stored = await chrome.storage.local.get('tab_sessions');
+            const sessions = stored.tab_sessions || {};
+            sessions[session.tabId] = snapshot;
+            await chrome.storage.local.set({ tab_sessions: sessions });
+          });
         } catch {
           // Non-fatal
         }
@@ -666,6 +858,10 @@ export class TabDebuggerManager {
   public setTabStatus(tabId: number, status: DebuggerSessionStatus, reason?: string): void {
     let session = this.sessions.get(tabId);
     if (!session) {
+      if (status === 'DETACHED') {
+        // Tab was removed or not tracked; do NOT resurrect closed tabs into memory/storage
+        return;
+      }
       session = this.createSession(tabId);
     }
     session.status = status;

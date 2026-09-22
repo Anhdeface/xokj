@@ -246,5 +246,21 @@ describe('Feature 11 & 12: DevTools Conflict Detection & Safe Reconnection', () 
         {}
       );
     });
+
+    it('T2.5: fires exactly one lifecycle message and one storage write per detachment event in integrated mode', async () => {
+      await debuggerMgr.attachTab(42);
+      context.mockTabs.sendMessage.mockClear();
+      context.mockRuntime.sendMessage.mockClear();
+
+      // Trigger detach
+      context.mockDebugger._emitDetach({ tabId: 42 }, 'canceled_by_user');
+
+      // Verify tabs.sendMessage called exactly once for tab 42
+      const tabCalls = context.mockTabs.sendMessage.mock.calls.filter(([tabId]) => tabId === 42);
+      expect(tabCalls.length).toBe(1);
+
+      // Verify runtime.sendMessage called exactly once
+      expect(context.mockRuntime.sendMessage).toHaveBeenCalledTimes(1);
+    });
   });
 });

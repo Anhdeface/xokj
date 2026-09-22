@@ -105,7 +105,7 @@ describe('Adversarial Stress Test: Popup UI & Background UI IPC', () => {
       expect(updatedCheckbox.checked).toBe(true);
     });
 
-    it.fails('1.2: concurrent toggles across multiple distinct scripts do not lose updates (REPRODUCED BUG: lost update race condition)', async () => {
+    it('1.2: concurrent toggles across multiple distinct scripts do not lose updates (REPRODUCED BUG: lost update race condition)', async () => {
       // Seed 5 scripts
       for (let i = 1; i <= 5; i++) {
         await saveScript({

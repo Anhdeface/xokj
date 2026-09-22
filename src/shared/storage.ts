@@ -229,16 +229,150 @@ async function setStorageItem<T>(key: string, value: T): Promise<void> {
 }
 
 /**
- * Retrieves all stored scripts.
- * If storage is empty, automatically seeds with DEFAULT_SCRIPTS.
- * Always returns deep-cloned records to protect internal storage.
+ * Asynchronous FIFO Mutex for serializing storage read-modify-write transactions.
+ * Guarantees strict FIFO execution order, rejection isolation (a failing task does
+ * not poison subsequent tasks), and zero memory leaks via idle queue reset.
  */
-export async function getScripts(): Promise<Record<string, ScriptRecord>> {
+export class AsyncMutex {
+  private queue: Promise<unknown> = Promise.resolve();
+  private pendingCount = 0;
+
+  /**
+   * Executes an asynchronous task exclusively.
+   * Tasks are queued in strict FIFO order. If a task throws or rejects,
+   * the caller receives the error, but subsequent queued tasks proceed normally.
+   */
+  public async runExclusive<T>(task: () => Promise<T> | T): Promise<T> {
+    this.pendingCount++;
+    const prev = this.queue;
+
+    const next = (async () => {
+      await prev;
+      return await task();
+    })();
+
+    // Ensure queue tail always settles cleanly, preventing unhandled rejections
+    // and ensuring subsequent tasks are never blocked by upstream rejections.
+    this.queue = next.catch(() => {});
+
+    try {
+      return await next;
+    } finally {
+      this.pendingCount--;
+      if (this.pendingCount === 0) {
+        // Break closure retention chain when queue is completely idle
+        this.queue = Promise.resolve();
+      }
+    }
+  }
+
+  /**
+   * Returns true if the mutex is currently locked or has tasks waiting in queue.
+   */
+  public isLocked(): boolean {
+    return this.pendingCount > 0;
+  }
+}
+
+/**
+ * Shared storage mutex instance protecting chrome.storage.local write transactions.
+ */
+export const storageMutex = new AsyncMutex();
+
+/**
+ * Pure in-memory helper that validates, parses metadata, and constructs
+ * a complete ScriptRecord without performing storage I/O or acquiring mutexes.
+ * Reusable across saveScript and importScripts.
+ */
+function prepareScriptRecord(
+  script: ScriptRecord | (Partial<ScriptRecord> & { code: string; id?: string }),
+  existing?: ScriptRecord,
+  now: number = Date.now()
+): ScriptRecord {
+  if (!script || typeof script.code !== 'string') {
+    throw new Error('Cannot save script without valid source code');
+  }
+
+  let id = script.id;
+  if (!id) {
+    id =
+      typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `script_${now}_${Math.random().toString(36).slice(2, 7)}`;
+  }
+
+  const existingCodeChanged = Boolean(existing && existing.code !== script.code);
+
+  let metadata = script.metadata;
+  let parseErrors: string[] | undefined = existing?.parseErrors;
+
+  const metadataMissing =
+    !metadata ||
+    ((!metadata.matches || metadata.matches.length === 0) &&
+      (!metadata.matchPatterns || metadata.matchPatterns.length === 0));
+
+  if (existingCodeChanged || metadataMissing) {
+    const parseRes = parseMetadata(script.code);
+    metadata = parseRes.metadata;
+    parseErrors = parseRes.errors.length > 0 ? parseRes.errors : undefined;
+  }
+
+  if (!metadata) {
+    const parseRes = parseMetadata(script.code);
+    metadata = parseRes.metadata;
+  }
+
+  const name = script.name || metadata.name || existing?.name || 'Unnamed Script';
+
+  const updatedScript: ScriptRecord = {
+    id,
+    name,
+    code: script.code,
+    metadata: deepClone(metadata),
+    enabled: typeof script.enabled === 'boolean' ? script.enabled : existing?.enabled ?? true,
+    createdAt: existing?.createdAt || script.createdAt || now,
+    updatedAt: now,
+    lastRunAt: existing?.lastRunAt || script.lastRunAt,
+    parseErrors
+  };
+
+  return updatedScript;
+}
+
+/**
+ * Internal helper to read scripts directly from storage without acquiring the mutex.
+ * Must only be called within mutex-locked execution contexts or when seeding.
+ */
+async function getScriptsInternal(): Promise<Record<string, ScriptRecord>> {
   const scripts = await getStorageItem<Record<string, ScriptRecord>>(STORAGE_KEYS.SCRIPTS);
   if (scripts === undefined || scripts === null) {
     const initial = deepClone(DEFAULT_SCRIPTS);
     await setStorageItem(STORAGE_KEYS.SCRIPTS, initial);
     return deepClone(initial);
+  }
+  return deepClone(scripts);
+}
+
+/**
+ * Internal helper to read settings directly from storage.
+ */
+async function getSettingsInternal(): Promise<AppSettings> {
+  const settings = await getStorageItem<AppSettings>(STORAGE_KEYS.SETTINGS);
+  return settings ? deepClone(settings) : deepClone(DEFAULT_SETTINGS);
+}
+
+/**
+ * Retrieves all stored scripts.
+ * If storage is empty, safely acquires mutex to seed with DEFAULT_SCRIPTS.
+ * Once initialized, serves direct parallel reads with zero mutex contention.
+ * Always returns deep-cloned records to protect internal storage.
+ */
+export async function getScripts(): Promise<Record<string, ScriptRecord>> {
+  const scripts = await getStorageItem<Record<string, ScriptRecord>>(STORAGE_KEYS.SCRIPTS);
+  if (scripts === undefined || scripts === null) {
+    return storageMutex.runExclusive(async () => {
+      return getScriptsInternal();
+    });
   }
   return deepClone(scripts);
 }
@@ -313,56 +447,25 @@ export async function saveScript(
     throw new Error('Cannot save script without valid source code');
   }
 
-  const scripts = await getScripts();
-  const now = Date.now();
+  return storageMutex.runExclusive(async () => {
+    const scripts = await getScriptsInternal();
+    const now = Date.now();
+    const existing = script.id ? scripts[script.id] : undefined;
+    const updated = prepareScriptRecord(script, existing, now);
 
-  let id = script.id;
-  if (!id) {
-    id =
-      typeof crypto !== 'undefined' && crypto.randomUUID
-        ? crypto.randomUUID()
-        : `script_${now}_${Math.random().toString(36).slice(2, 7)}`;
-  }
+    if (!script.id) {
+      while (scripts[updated.id]) {
+        updated.id =
+          typeof crypto !== 'undefined' && crypto.randomUUID
+            ? crypto.randomUUID()
+            : `script_${now}_${Math.random().toString(36).slice(2, 7)}`;
+      }
+    }
 
-  const existing = scripts[id];
-  const existingCodeChanged = Boolean(existing && existing.code !== script.code);
-
-  let metadata = script.metadata;
-  let parseErrors: string[] | undefined = existing?.parseErrors;
-
-  const metadataMissing =
-    !metadata ||
-    ((!metadata.matches || metadata.matches.length === 0) &&
-      (!metadata.matchPatterns || metadata.matchPatterns.length === 0));
-
-  if (existingCodeChanged || metadataMissing) {
-    const parseRes = parseMetadata(script.code);
-    metadata = parseRes.metadata;
-    parseErrors = parseRes.errors.length > 0 ? parseRes.errors : undefined;
-  }
-
-  if (!metadata) {
-    const parseRes = parseMetadata(script.code);
-    metadata = parseRes.metadata;
-  }
-
-  const name = script.name || metadata.name || existing?.name || 'Unnamed Script';
-
-  const updatedScript: ScriptRecord = {
-    id,
-    name,
-    code: script.code,
-    metadata: deepClone(metadata),
-    enabled: typeof script.enabled === 'boolean' ? script.enabled : existing?.enabled ?? true,
-    createdAt: existing?.createdAt || script.createdAt || now,
-    updatedAt: now,
-    lastRunAt: existing?.lastRunAt || script.lastRunAt,
-    parseErrors
-  };
-
-  scripts[id] = updatedScript;
-  await setStorageItem(STORAGE_KEYS.SCRIPTS, scripts);
-  return deepClone(updatedScript);
+    scripts[updated.id] = updated;
+    await setStorageItem(STORAGE_KEYS.SCRIPTS, scripts);
+    return deepClone(updated);
+  });
 }
 
 /**
@@ -370,11 +473,13 @@ export async function saveScript(
  * Never mutates DEFAULT_SCRIPTS.
  */
 export async function deleteScript(id: string): Promise<void> {
-  const scripts = await getScripts();
-  if (scripts[id]) {
-    delete scripts[id];
-    await setStorageItem(STORAGE_KEYS.SCRIPTS, scripts);
-  }
+  return storageMutex.runExclusive(async () => {
+    const scripts = await getScriptsInternal();
+    if (scripts[id]) {
+      delete scripts[id];
+      await setStorageItem(STORAGE_KEYS.SCRIPTS, scripts);
+    }
+  });
 }
 
 /**
@@ -383,18 +488,20 @@ export async function deleteScript(id: string): Promise<void> {
  * Otherwise flips current value.
  */
 export async function toggleScript(id: string, enabled?: boolean): Promise<boolean> {
-  const scripts = await getScripts();
-  const script = scripts[id];
-  if (!script) {
-    throw new Error(`Script with ID "${id}" not found`);
-  }
+  return storageMutex.runExclusive(async () => {
+    const scripts = await getScriptsInternal();
+    const script = scripts[id];
+    if (!script) {
+      throw new Error(`Script with ID "${id}" not found`);
+    }
 
-  const newStatus = typeof enabled === 'boolean' ? enabled : !script.enabled;
-  script.enabled = newStatus;
-  script.updatedAt = Date.now();
+    const newStatus = typeof enabled === 'boolean' ? enabled : !script.enabled;
+    script.enabled = newStatus;
+    script.updatedAt = Date.now();
 
-  await setStorageItem(STORAGE_KEYS.SCRIPTS, scripts);
-  return newStatus;
+    await setStorageItem(STORAGE_KEYS.SCRIPTS, scripts);
+    return newStatus;
+  });
 }
 
 /**
@@ -402,9 +509,11 @@ export async function toggleScript(id: string, enabled?: boolean): Promise<boole
  * Deep-clones DEFAULT_SCRIPTS so the template remains intact.
  */
 export async function resetToDefaultScripts(): Promise<Record<string, ScriptRecord>> {
-  const defaults = deepClone(DEFAULT_SCRIPTS);
-  await setStorageItem(STORAGE_KEYS.SCRIPTS, defaults);
-  return deepClone(defaults);
+  return storageMutex.runExclusive(async () => {
+    const defaults = deepClone(DEFAULT_SCRIPTS);
+    await setStorageItem(STORAGE_KEYS.SCRIPTS, defaults);
+    return deepClone(defaults);
+  });
 }
 
 /**
@@ -445,6 +554,7 @@ export interface ImportResult {
   imported: number;
   updated: number;
   failed: number;
+  skipped?: number;
   errors?: string[];
   scripts?: ScriptRecord[];
 }
@@ -461,6 +571,7 @@ export async function importScripts(
     imported: 0,
     updated: 0,
     failed: 0,
+    skipped: 0,
     errors: [],
     scripts: []
   };
@@ -469,6 +580,9 @@ export async function importScripts(
   try {
     if (typeof jsonOrArray === 'string') {
       const trimmed = jsonOrArray.trim();
+      if (!trimmed) {
+        throw new Error('Import string is empty');
+      }
       if (trimmed.startsWith('// ==UserScript==')) {
         rawList = [{ code: trimmed }];
       } else {
@@ -496,44 +610,68 @@ export async function importScripts(
   }
 
   result.total = rawList.length;
-  const existingScripts = await getScripts();
 
-  for (let i = 0; i < rawList.length; i++) {
-    const raw = rawList[i];
-    try {
-      if (!raw || typeof raw.code !== 'string') {
+  return storageMutex.runExclusive(async () => {
+    const scripts = await getScriptsInternal();
+    const now = Date.now();
+    let hasMutations = false;
+
+    for (let i = 0; i < rawList.length; i++) {
+      const raw = rawList[i];
+      try {
+        if (!raw || typeof raw.code !== 'string') {
+          result.failed++;
+          if (result.skipped !== undefined) result.skipped++;
+          result.errors!.push(`Item #${i + 1} skipped: missing "code" property`);
+          continue;
+        }
+
+        const hasId = raw.id && typeof raw.id === 'string';
+        const exists = Boolean(hasId && scripts[raw.id]);
+
+        const itemToSave = { ...raw };
+        if (exists && !options.overwrite) {
+          itemToSave.id = undefined; // Generate new ID
+        }
+
+        if (options.autoEnable !== undefined) {
+          itemToSave.enabled = options.autoEnable;
+        }
+
+        const existingRecord = itemToSave.id && scripts[itemToSave.id] ? scripts[itemToSave.id] : undefined;
+        const saved = prepareScriptRecord(itemToSave, existingRecord, now);
+
+        // Ensure newly generated ID does not collide with existing or intra-batch scripts
+        if (!itemToSave.id) {
+          while (scripts[saved.id]) {
+            saved.id =
+              typeof crypto !== 'undefined' && crypto.randomUUID
+                ? crypto.randomUUID()
+                : `script_${now}_${Math.random().toString(36).slice(2, 7)}`;
+          }
+        }
+
+        scripts[saved.id] = saved;
+        hasMutations = true;
+        result.scripts!.push(deepClone(saved));
+
+        if (exists && options.overwrite) {
+          result.updated++;
+        } else {
+          result.imported++;
+        }
+      } catch (err: any) {
         result.failed++;
-        result.errors!.push(`Item #${i + 1} skipped: missing "code" property`);
-        continue;
+        result.errors!.push(`Item #${i + 1} error: ${err.message || String(err)}`);
       }
-
-      const hasId = raw.id && typeof raw.id === 'string';
-      const exists = hasId && !!existingScripts[raw.id];
-
-      const itemToSave = { ...raw };
-      if (exists && !options.overwrite) {
-        itemToSave.id = undefined; // Generate new ID
-      }
-
-      if (options.autoEnable !== undefined) {
-        itemToSave.enabled = options.autoEnable;
-      }
-
-      const saved = await saveScript(itemToSave);
-      result.scripts!.push(saved);
-
-      if (exists && options.overwrite) {
-        result.updated++;
-      } else {
-        result.imported++;
-      }
-    } catch (err: any) {
-      result.failed++;
-      result.errors!.push(`Item #${i + 1} error: ${err.message || String(err)}`);
     }
-  }
 
-  return result;
+    if (hasMutations) {
+      await setStorageItem(STORAGE_KEYS.SCRIPTS, scripts);
+    }
+
+    return result;
+  });
 }
 
 /**
@@ -563,16 +701,17 @@ export function onScriptsChanged(
  * Retrieves global application settings.
  */
 export async function getSettings(): Promise<AppSettings> {
-  const settings = await getStorageItem<AppSettings>(STORAGE_KEYS.SETTINGS);
-  return settings ? deepClone(settings) : deepClone(DEFAULT_SETTINGS);
+  return getSettingsInternal();
 }
 
 /**
  * Updates application settings.
  */
 export async function saveSettings(settings: Partial<AppSettings>): Promise<AppSettings> {
-  const current = await getSettings();
-  const updated = { ...current, ...deepClone(settings) };
-  await setStorageItem(STORAGE_KEYS.SETTINGS, updated);
-  return deepClone(updated);
+  return storageMutex.runExclusive(async () => {
+    const current = await getSettingsInternal();
+    const updated = { ...current, ...deepClone(settings) };
+    await setStorageItem(STORAGE_KEYS.SETTINGS, updated);
+    return deepClone(updated);
+  });
 }

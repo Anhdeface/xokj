@@ -358,5 +358,218 @@ console.log('single');`;
       expect(callback).not.toHaveBeenCalled();
     });
   });
+
+  describe('Tier 6: Concurrency & Mutex Serialization', () => {
+    it('T6.1: 50 parallel saveScript calls serialize without lost records or corruptions', async () => {
+      // Clear default scripts for a clean test baseline
+      await resetToDefaultScripts();
+      const initialScripts = await getScripts();
+      const initialCount = Object.keys(initialScripts).length;
+
+      const PARALLEL_COUNT = 50;
+      const scriptPayloads = Array.from({ length: PARALLEL_COUNT }, (_, i) => ({
+        id: `parallel-script-${i + 1}`,
+        name: `Parallel Script ${i + 1}`,
+        code: `// ==UserScript==\n// @name Parallel Script ${i + 1}\n// @match https://site${i + 1}.com/*\n// ==/UserScript==`,
+        enabled: i % 2 === 0
+      }));
+
+      // Fire all 50 saveScript calls simultaneously
+      await Promise.all(scriptPayloads.map((payload) => saveScript(payload)));
+
+      const stored = await getScripts();
+      expect(Object.keys(stored).length).toBe(initialCount + PARALLEL_COUNT);
+
+      for (let i = 1; i <= PARALLEL_COUNT; i++) {
+        const id = `parallel-script-${i}`;
+        const record = stored[id];
+        expect(record).toBeDefined();
+        expect(record.name).toBe(`Parallel Script ${i}`);
+        expect(record.enabled).toBe((i - 1) % 2 === 0);
+        expect(record.createdAt).toBeGreaterThan(0);
+        expect(record.updatedAt).toBeGreaterThan(0);
+        expect(record.metadata?.matches).toContain(`https://site${i}.com/*`);
+      }
+    });
+
+    it('T6.2: rapid concurrent updates to the same script serialize cleanly without field corruption', async () => {
+      await saveScript({
+        id: 'target-single-script',
+        code: '// ==UserScript==\n// @name Target Script Initial\n// @version 1.0.0\n// @match https://example.com/*\n// ==/UserScript=='
+      });
+
+      const UPDATE_COUNT = 30;
+      const updates = Array.from({ length: UPDATE_COUNT }, (_, i) => ({
+        id: 'target-single-script',
+        code: `// ==UserScript==\n// @name Target Script V${i + 1}\n// @version 1.0.${i + 1}\n// @match https://example.com/*\n// ==/UserScript==`
+      }));
+
+      // Dispatch 30 parallel updates to the same script ID
+      await Promise.all(updates.map((u) => saveScript(u)));
+
+      const finalRecord = await getScript('target-single-script');
+      expect(finalRecord).not.toBeNull();
+      // Must have valid metadata and a version between 1.0.1 and 1.0.30
+      expect(finalRecord?.metadata?.version).toMatch(/^1\.0\.\d+$/);
+      expect(finalRecord?.parseErrors).toBeUndefined();
+    });
+
+    it('T6.3: simultaneous toggleScript and deleteScript does not resurrect deleted script', async () => {
+      const targetId = 'race-toggle-delete-script';
+      await saveScript({
+        id: targetId,
+        code: '// ==UserScript==\n// @name Race Script\n// @match https://example.com/*\n// ==/UserScript==',
+        enabled: true
+      });
+
+      // Concurrently run toggle and delete
+      const togglePromise = toggleScript(targetId, false);
+      const deletePromise = deleteScript(targetId);
+
+      const [toggleResult, deleteResult] = await Promise.allSettled([togglePromise, deletePromise]);
+
+      // deleteScript must always fulfill
+      expect(deleteResult.status).toBe('fulfilled');
+
+      // Regardless of which completed first, the script must be DELETED from storage
+      const finalStored = await getScript(targetId);
+      expect(finalStored).toBeNull();
+
+      // If delete completed before toggle, toggle must reject with 'not found'
+      if (toggleResult.status === 'rejected') {
+        expect((toggleResult as PromiseRejectedResult).reason.message).toContain('not found');
+      } else {
+        expect(toggleResult.status).toBe('fulfilled');
+      }
+    });
+
+    it('T6.4: rejected task in mutex queue does not poison queue for subsequent tasks', async () => {
+      const validId1 = 'poison-test-task-1';
+      const validId2 = 'poison-test-task-2';
+      const failingId = 'non-existent-script-xyz';
+
+      const task1 = saveScript({
+        id: validId1,
+        code: '// ==UserScript==\n// @name Task 1\n// @match https://example.com/*\n// ==/UserScript=='
+      });
+
+      // Task 2 will fail because the script does not exist
+      const task2 = toggleScript(failingId, false);
+
+      const task3 = saveScript({
+        id: validId2,
+        code: '// ==UserScript==\n// @name Task 2\n// @match https://example.com/*\n// ==/UserScript=='
+      });
+
+      const results = await Promise.allSettled([task1, task2, task3]);
+
+      expect(results[0].status).toBe('fulfilled');
+      expect(results[1].status).toBe('rejected');
+      expect((results[1] as PromiseRejectedResult).reason.message).toContain('not found');
+      expect(results[2].status).toBe('fulfilled');
+
+      // Subsequent independent mutation executes without deadlock
+      const task4 = await saveScript({
+        id: 'poison-test-task-3',
+        code: '// ==UserScript==\n// @name Task 3\n// @match https://example.com/*\n// ==/UserScript=='
+      });
+      expect(task4.id).toBe('poison-test-task-3');
+
+      // Verify storage contains task 1, 2, and 3
+      const stored = await getScripts();
+      expect(stored[validId1]).toBeDefined();
+      expect(stored[validId2]).toBeDefined();
+      expect(stored['poison-test-task-3']).toBeDefined();
+      expect(stored[failingId]).toBeUndefined();
+    });
+
+    it('T6.5: concurrent saveSettings calls atomically merge disjoint settings properties', async () => {
+      await saveSettings({
+        globalEnabled: true,
+        autoAttachDebugger: true,
+        debuggerProtocolVersion: '1.3',
+        logLevel: 'info'
+      });
+
+      // Three concurrent partial setting updates
+      const p1 = saveSettings({ globalEnabled: false });
+      const p2 = saveSettings({ logLevel: 'debug' });
+      const p3 = saveSettings({ debuggerProtocolVersion: '1.4' });
+
+      await Promise.all([p1, p2, p3]);
+
+      const finalSettings = await getSettings();
+      expect(finalSettings.globalEnabled).toBe(false);
+      expect(finalSettings.logLevel).toBe('debug');
+      expect(finalSettings.debuggerProtocolVersion).toBe('1.4');
+      // Untouched setting remains preserved
+      expect(finalSettings.autoAttachDebugger).toBe(true);
+    });
+
+    it('T6.6: concurrent batch importScripts does not deadlock with individual mutations', async () => {
+      const bundle1 = JSON.stringify({
+        version: 1,
+        generator: 'test',
+        scripts: [
+          { id: 'batch-1-a', code: '// ==UserScript==\n// @name Batch 1A\n// ==/UserScript==' },
+          { id: 'batch-1-b', code: '// ==UserScript==\n// @name Batch 1B\n// ==/UserScript==' }
+        ]
+      });
+
+      const bundle2 = JSON.stringify({
+        version: 1,
+        generator: 'test',
+        scripts: [
+          { id: 'batch-2-a', code: '// ==UserScript==\n// @name Batch 2A\n// ==/UserScript==' },
+          { id: 'batch-2-b', code: '// ==UserScript==\n// @name Batch 2B\n// ==/UserScript==' }
+        ]
+      });
+
+      const singleSave = saveScript({
+        id: 'solo-concurrent',
+        code: '// ==UserScript==\n// @name Solo\n// ==/UserScript=='
+      });
+
+      const [res1, res2, solo] = await Promise.all([
+        importScripts(bundle1, { overwrite: true }),
+        importScripts(bundle2, { overwrite: true }),
+        singleSave
+      ]);
+
+      expect(res1.imported + res1.updated).toBe(2);
+      expect(res2.imported + res2.updated).toBe(2);
+      expect(solo.id).toBe('solo-concurrent');
+
+      const all = await getScripts();
+      expect(all['batch-1-a']).toBeDefined();
+      expect(all['batch-1-b']).toBeDefined();
+      expect(all['batch-2-a']).toBeDefined();
+      expect(all['batch-2-b']).toBeDefined();
+      expect(all['solo-concurrent']).toBeDefined();
+    });
+
+    it('T6.7: high-frequency concurrent reads during mutations return consistent snapshots', async () => {
+      const writers = Array.from({ length: 20 }, (_, i) =>
+        saveScript({
+          id: `read-write-race-${i}`,
+          code: `// ==UserScript==\n// @name RW Script ${i}\n// ==/UserScript==`
+        })
+      );
+
+      const readers = Array.from({ length: 20 }, () => getScripts());
+
+      const results = await Promise.all([...writers, ...readers]);
+      // All 20 readers must return valid Record<string, ScriptRecord> objects
+      const readResults = results.slice(20) as Record<string, ScriptRecord>[];
+      for (const snapshot of readResults) {
+        expect(typeof snapshot).toBe('object');
+        expect(snapshot).not.toBeNull();
+        for (const [id, script] of Object.entries(snapshot)) {
+          expect(script.id).toBe(id);
+          expect(script.code).toBeDefined();
+        }
+      }
+    });
+  });
 });
 

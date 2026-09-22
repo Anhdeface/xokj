@@ -7,9 +7,9 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { setupChromeMock } from '../mocks/chrome';
-import { ScriptInjector } from '@/background/injector';
+import { ScriptInjector, pageSandboxRunner } from '@/background/injector';
 import { TabDebuggerManager } from '@/background/debugger-mgr';
-import { saveScript, resetToDefaultScripts, saveSettings } from '@/shared/storage';
+import { saveScript, resetToDefaultScripts, saveSettings, deleteScript } from '@/shared/storage';
 import type { ScriptRecord } from '@/shared/types';
 
 describe('Feature 16: Lifecycle-based Script Injection (injector.ts)', () => {
@@ -538,6 +538,750 @@ describe('Feature 16: Lifecycle-based Script Injection (injector.ts)', () => {
 
       delete (window as any).cdp;
       delete (window as any).__probeGrantedResults;
+    });
+  });
+
+  // =========================================================================
+  // Milestone 3: Injection Pipeline & Navigation Lifecycle Hardening
+  // =========================================================================
+
+  // Feature 11: Frame-Scoped Navigation Deduplication
+  describe('Feature 11: Frame-Scoped Navigation Deduplication', () => {
+    const subframeScript: ScriptRecord = {
+      id: 'subframe-multi-test',
+      name: 'Subframe Multi Test',
+      code: '// ==UserScript==\n// @name Subframe Multi Test\n// ==/UserScript==',
+      metadata: {
+        name: 'Subframe Multi Test',
+        matches: ['*://example.com/*'],
+        matchPatterns: ['*://example.com/*'],
+        includes: [],
+        excludes: [],
+        runAt: 'document-start',
+        grants: [],
+        cdp: [],
+        cdpDeclarations: [],
+        cdpDomains: [],
+        requires: [],
+        resources: {},
+        noframes: false,
+        connects: [],
+        rawEntries: {}
+      },
+      enabled: true,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+
+    beforeEach(async () => {
+      await deleteScript('sample-cdp-logger');
+      await deleteScript('sample-dom-highlighter');
+      await deleteScript('sample-cookie-inspector');
+      await saveScript(subframeScript);
+    });
+
+    it('M3.1.1: subframe A injection does not block subframe B in the same tab', async () => {
+      const tabId = 100;
+
+      // Inject Subframe A (frameId: 1)
+      await injector.handleCommitted({
+        tabId,
+        frameId: 1,
+        url: 'https://example.com/iframeA',
+        processId: 1,
+        transitionType: 'auto_subframe',
+        transitionQualifiers: [],
+        timeStamp: Date.now()
+      });
+
+      expect(executedScripts.length).toBe(1);
+      expect(executedScripts[0].target.frameIds).toEqual([1]);
+      expect(injector.hasInjected(tabId, 1, 'subframe-multi-test', 'document-start')).toBe(true);
+
+      // Inject Subframe B (frameId: 2)
+      await injector.handleCommitted({
+        tabId,
+        frameId: 2,
+        url: 'https://example.com/iframeB',
+        processId: 1,
+        transitionType: 'auto_subframe',
+        transitionQualifiers: [],
+        timeStamp: Date.now()
+      });
+
+      // Subframe B must NOT be blocked by Subframe A
+      expect(executedScripts.length).toBe(2);
+      expect(executedScripts[1].target.frameIds).toEqual([2]);
+      expect(injector.hasInjected(tabId, 2, 'subframe-multi-test', 'document-start')).toBe(true);
+    });
+
+    it('M3.1.2: re-navigating subframe A clears only subframe A history and preserves subframe B', async () => {
+      const tabId = 101;
+
+      // 1. Initial injection into Frame 1 and Frame 2
+      await injector.handleCommitted({
+        tabId,
+        frameId: 1,
+        url: 'https://example.com/iframeA',
+        processId: 1,
+        transitionType: 'auto_subframe',
+        transitionQualifiers: [],
+        timeStamp: Date.now()
+      });
+      await injector.handleCommitted({
+        tabId,
+        frameId: 2,
+        url: 'https://example.com/iframeB',
+        processId: 1,
+        transitionType: 'auto_subframe',
+        transitionQualifiers: [],
+        timeStamp: Date.now()
+      });
+      expect(executedScripts.length).toBe(2);
+
+      // 2. Re-navigate Subframe A (frameId: 1) to a new URL
+      await injector.handleCommitted({
+        tabId,
+        frameId: 1,
+        url: 'https://example.com/iframeA-v2',
+        processId: 1,
+        transitionType: 'manual_subframe',
+        transitionQualifiers: [],
+        timeStamp: Date.now()
+      });
+
+      // Frame 1 must re-inject
+      expect(executedScripts.length).toBe(3);
+      expect(executedScripts[2].target.frameIds).toEqual([1]);
+
+      // 3. Subframe B was NOT re-navigated; a duplicate commit on Frame 2 must be blocked
+      await injector.handleCommitted({
+        tabId,
+        frameId: 2,
+        url: 'https://example.com/iframeB',
+        processId: 1,
+        transitionType: 'auto_subframe',
+        transitionQualifiers: [],
+        timeStamp: Date.now()
+      });
+
+      // Total injections must remain 3
+      expect(executedScripts.length).toBe(3);
+    });
+
+    it('M3.1.3: top-level navigation (frameId === 0) clears all nested subframe injection histories', async () => {
+      const tabId = 102;
+
+      // Setup Frame 0, Frame 1
+      await injector.handleCommitted({
+        tabId,
+        frameId: 0,
+        url: 'https://example.com/main',
+        processId: 1,
+        transitionType: 'link',
+        timeStamp: Date.now()
+      });
+      await injector.handleCommitted({
+        tabId,
+        frameId: 1,
+        url: 'https://example.com/iframe1',
+        processId: 1,
+        transitionType: 'auto_subframe',
+        timeStamp: Date.now()
+      });
+      expect(executedScripts.length).toBe(2);
+
+      // Top-level navigation occurs on Tab 102 to a new URL
+      await injector.handleCommitted({
+        tabId,
+        frameId: 0,
+        url: 'https://example.com/main-page-2',
+        processId: 1,
+        transitionType: 'link',
+        timeStamp: Date.now()
+      });
+      expect(executedScripts.length).toBe(3);
+
+      // Subframe 1 now loads again under new page: must re-inject
+      await injector.handleCommitted({
+        tabId,
+        frameId: 1,
+        url: 'https://example.com/iframe1',
+        processId: 1,
+        transitionType: 'auto_subframe',
+        timeStamp: Date.now()
+      });
+      expect(executedScripts.length).toBe(4);
+    });
+
+    it('M3.1.4: tab closure completely removes all nested subframe history maps without memory leaks', async () => {
+      const tabId = 103;
+
+      await injector.handleCommitted({
+        tabId,
+        frameId: 1,
+        url: 'https://example.com/iframe1',
+        processId: 1,
+        transitionType: 'auto_subframe',
+        timeStamp: Date.now()
+      });
+      expect(injector.hasInjected(tabId, 1, 'subframe-multi-test', 'document-start')).toBe(true);
+
+      // Tab closed
+      injector.handleTabRemoved(tabId);
+
+      expect(injector.hasInjected(tabId, 1, 'subframe-multi-test', 'document-start')).toBe(false);
+      // Access private maps via index signature to verify zero leaked entries
+      expect((injector as any).injectionHistory.has(tabId)).toBe(false);
+      expect((injector as any).tabUrls.has(tabId)).toBe(false);
+      expect((injector as any).tabDocumentIds.has(tabId)).toBe(false);
+    });
+  });
+
+  // Feature 12: Same-URL Link Navigation Reset
+  describe('Feature 12: Same-URL Link Navigation Reset', () => {
+    it('M3.2.1: same-URL navigation with new documentId resets deduplication for frameId === 0', async () => {
+      const tabId = 200;
+      const targetUrl = 'https://httpbin.org/get';
+
+      // 1. Initial navigation
+      await injector.handleCommitted({
+        tabId,
+        frameId: 0,
+        url: targetUrl,
+        processId: 1,
+        transitionType: 'link',
+        transitionQualifiers: [],
+        documentId: 'doc-initial-1',
+        timeStamp: Date.now()
+      });
+      expect(executedScripts.length).toBe(1);
+
+      // 2. User clicks link pointing to the exact same URL (new documentId committed)
+      await injector.handleCommitted({
+        tabId,
+        frameId: 0,
+        url: targetUrl,
+        processId: 1,
+        transitionType: 'link',
+        transitionQualifiers: [],
+        documentId: 'doc-nav-same-url-2',
+        timeStamp: Date.now()
+      });
+
+      // Must re-execute script because a new document context was committed
+      expect(executedScripts.length).toBe(2);
+      expect(executedScripts[1].args[2]).toBe('sample-cdp-logger');
+      expect(injector.hasInjected(tabId, 0, 'sample-cdp-logger', 'document-start')).toBe(true);
+    });
+
+    it('M3.2.2: typed/form_submit with new documentId resets deduplication for frameId === 0', async () => {
+      const tabId = 201;
+      const targetUrl = 'https://httpbin.org/get';
+
+      await injector.handleCommitted({
+        tabId,
+        frameId: 0,
+        url: targetUrl,
+        processId: 1,
+        transitionType: 'typed',
+        documentId: 'doc-typed-1',
+        timeStamp: Date.now()
+      });
+      expect(executedScripts.length).toBe(1);
+
+      await injector.handleCommitted({
+        tabId,
+        frameId: 0,
+        url: targetUrl,
+        processId: 1,
+        transitionType: 'form_submit',
+        documentId: 'doc-submit-2',
+        timeStamp: Date.now()
+      });
+      expect(executedScripts.length).toBe(2);
+    });
+
+    it('M3.2.3: duplicate committed events on same document do NOT duplicate', async () => {
+      const tabId = 202;
+      const targetUrl = 'https://httpbin.org/get';
+
+      await injector.handleCommitted({
+        tabId,
+        frameId: 0,
+        url: targetUrl,
+        processId: 1,
+        transitionType: 'link',
+        documentId: 'doc-same-3',
+        timeStamp: Date.now()
+      });
+      expect(executedScripts.length).toBe(1);
+
+      // Duplicate delivery of committed event with identical documentId
+      await injector.handleCommitted({
+        tabId,
+        frameId: 0,
+        url: targetUrl,
+        processId: 1,
+        transitionType: 'link',
+        documentId: 'doc-same-3',
+        timeStamp: Date.now()
+      });
+      expect(executedScripts.length).toBe(1); // Not duplicated
+    });
+  });
+
+  // Feature 13: Declarative CDP Ordering for All Stages
+  describe('Feature 13: Declarative CDP Ordering for All Stages', () => {
+    it('M3.3.1: document-end script with @cdp triggers attachTab & initializeDeclaredDomains', async () => {
+      const docEndCdpScript: ScriptRecord = {
+        id: 'doc-end-cdp',
+        name: 'Doc End CDP',
+        code: '// ==UserScript==\n// @name Doc End CDP\n// @run-at document-end\n// @grant GM_cdp\n// @cdp Network.enable {"maxTotalBufferSize": 5000}\n// ==/UserScript==',
+        metadata: {
+          name: 'Doc End CDP',
+          matches: ['*://example.com/end-test*'],
+          matchPatterns: ['*://example.com/end-test*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-end',
+          grants: ['GM_cdp'],
+          cdp: [{ domain: 'Network', method: 'enable', command: 'Network.enable', params: { maxTotalBufferSize: 5000 } }],
+          cdpDeclarations: [{ domain: 'Network', method: 'enable', command: 'Network.enable', params: { maxTotalBufferSize: 5000 } }],
+          cdpDomains: ['Network'],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await deleteScript('sample-dom-highlighter');
+      await saveScript(docEndCdpScript);
+
+      const attachSpy = vi.spyOn(debuggerMgr, 'attachTab');
+      const initDomainsSpy = vi.spyOn(debuggerMgr, 'initializeDeclaredDomains');
+
+      await injector.handleDOMContentLoaded({
+        tabId: 300,
+        frameId: 0,
+        url: 'https://example.com/end-test',
+        processId: 1,
+        timeStamp: Date.now()
+      });
+
+      expect(attachSpy).toHaveBeenCalledWith(300);
+      expect(initDomainsSpy).toHaveBeenCalledWith(300, 'https://example.com/end-test');
+      expect(executedScripts.length).toBe(1);
+      expect(executedScripts[0].args[2]).toBe('doc-end-cdp');
+    });
+
+    it('M3.3.2: document-idle script with @cdp triggers attach & init', async () => {
+      const docIdleCdpScript: ScriptRecord = {
+        id: 'doc-idle-cdp',
+        name: 'Doc Idle CDP',
+        code: '// ==UserScript==\n// @name Doc Idle CDP\n// @run-at document-idle\n// @grant GM_cdp\n// @cdp Page.enable\n// ==/UserScript==',
+        metadata: {
+          name: 'Doc Idle CDP',
+          matches: ['*://example.com/idle-test*'],
+          matchPatterns: ['*://example.com/idle-test*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-idle',
+          grants: ['GM_cdp'],
+          cdp: [{ domain: 'Page', method: 'enable', command: 'Page.enable', params: {} }],
+          cdpDeclarations: [{ domain: 'Page', method: 'enable', command: 'Page.enable', params: {} }],
+          cdpDomains: ['Page'],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await deleteScript('sample-cookie-inspector');
+      await saveScript(docIdleCdpScript);
+
+      const attachSpy = vi.spyOn(debuggerMgr, 'attachTab');
+      const initDomainsSpy = vi.spyOn(debuggerMgr, 'initializeDeclaredDomains');
+
+      await injector.handleCompleted({
+        tabId: 301,
+        frameId: 0,
+        url: 'https://example.com/idle-test',
+        processId: 1,
+        timeStamp: Date.now()
+      });
+
+      expect(attachSpy).toHaveBeenCalledWith(301);
+      expect(initDomainsSpy).toHaveBeenCalledWith(301, 'https://example.com/idle-test');
+      expect(executedScripts.length).toBe(1);
+      expect(executedScripts[0].args[2]).toBe('doc-idle-cdp');
+    });
+
+    it('M3.3.3: plain script without @cdp does not trigger attach', async () => {
+      const plainScript: ScriptRecord = {
+        id: 'plain-dom-script',
+        name: 'Plain DOM Script',
+        code: '// ==UserScript==\n// @name Plain DOM\n// @run-at document-end\n// @grant none\n// ==/UserScript==',
+        metadata: {
+          name: 'Plain DOM',
+          matches: ['*://example.com/plain*'],
+          matchPatterns: ['*://example.com/plain*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-end',
+          grants: ['none'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await deleteScript('sample-dom-highlighter');
+      await saveScript(plainScript);
+
+      const attachSpy = vi.spyOn(debuggerMgr, 'attachTab');
+
+      await injector.handleDOMContentLoaded({
+        tabId: 302,
+        frameId: 0,
+        url: 'https://example.com/plain',
+        processId: 1,
+        timeStamp: Date.now()
+      });
+
+      expect(attachSpy).not.toHaveBeenCalled();
+      expect(executedScripts.length).toBe(1);
+      expect(executedScripts[0].args[2]).toBe('plain-dom-script');
+    });
+
+    it('M3.3.4: progressive multi-stage: tab attached at start is not re-attached at end', async () => {
+      const tabId = 303;
+      const targetUrl = 'https://httpbin.org/get'; // Default sample-cdp-logger runs at document-start
+
+      const docEndCdpScript: ScriptRecord = {
+        id: 'progressive-doc-end',
+        name: 'Progressive Doc End',
+        code: '// ==UserScript==\n// @name Progressive\n// @run-at document-end\n// @cdp DOM.enable\n// ==/UserScript==',
+        metadata: {
+          name: 'Progressive',
+          matches: ['https://httpbin.org/get*'],
+          matchPatterns: ['https://httpbin.org/get*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-end',
+          grants: ['GM_cdp'],
+          cdp: [{ domain: 'DOM', method: 'enable', command: 'DOM.enable', params: {} }],
+          cdpDeclarations: [{ domain: 'DOM', method: 'enable', command: 'DOM.enable', params: {} }],
+          cdpDomains: ['DOM'],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await deleteScript('sample-dom-highlighter');
+      await saveScript(docEndCdpScript);
+
+      const attachSpy = vi.spyOn(debuggerMgr, 'attachTab');
+
+      // 1. Stage: document-start
+      await injector.handleCommitted({
+        tabId,
+        frameId: 0,
+        url: targetUrl,
+        processId: 1,
+        transitionType: 'link',
+        timeStamp: Date.now()
+      });
+      const callsAfterStart = attachSpy.mock.calls.length;
+      expect(callsAfterStart).toBeGreaterThanOrEqual(1);
+
+      // 2. Stage: document-end
+      await injector.handleDOMContentLoaded({
+        tabId,
+        frameId: 0,
+        url: targetUrl,
+        processId: 1,
+        timeStamp: Date.now()
+      });
+
+      // attachTab should NOT be called again because tab is already ATTACHED
+      expect(attachSpy).toHaveBeenCalledTimes(callsAfterStart);
+      expect(executedScripts.length).toBe(2);
+    });
+  });
+
+  // Feature 14: Injection Failure Deduplication Rollback
+  describe('Feature 14: Injection Failure Deduplication Rollback', () => {
+    it('M3.4.1: multi-script batch partial failure rolls back only failed script', async () => {
+      const tabId = 400;
+      const targetUrl = 'https://example.com/batch-test';
+
+      const scriptA: ScriptRecord = {
+        id: 'script-fail',
+        name: 'Script Fail',
+        code: '// fail',
+        metadata: {
+          name: 'Script Fail',
+          matches: ['*://example.com/*'],
+          matchPatterns: ['*://example.com/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: [],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+
+      const scriptB: ScriptRecord = {
+        id: 'script-succeed',
+        name: 'Script Succeed',
+        code: '// succeed',
+        metadata: {
+          name: 'Script Succeed',
+          matches: ['*://example.com/*'],
+          matchPatterns: ['*://example.com/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: [],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+
+      await deleteScript('sample-cdp-logger');
+      await saveScript(scriptA);
+      await saveScript(scriptB);
+
+      // Script A fails; Script B succeeds
+      context.mockScripting.executeScript.mockImplementation(async (opts: any) => {
+        if (opts.args[2] === 'script-fail') {
+          throw new Error('Sandbox creation error');
+        }
+        executedScripts.push(opts);
+        return [{ result: true }];
+      });
+
+      await injector.handleCommitted({
+        tabId,
+        frameId: 0,
+        url: targetUrl,
+        processId: 1,
+        transitionType: 'link',
+        timeStamp: Date.now()
+      });
+
+      // Script A rolled back; Script B retained
+      expect(injector.hasInjected(tabId, 0, 'script-fail', 'document-start')).toBe(false);
+      expect(injector.hasInjected(tabId, 0, 'script-succeed', 'document-start')).toBe(true);
+      expect(executedScripts.length).toBe(1);
+      expect(executedScripts[0].args[2]).toBe('script-succeed');
+
+      // Now fix Script A failure and trigger processStage again
+      context.mockScripting.executeScript.mockImplementation(async (opts: any) => {
+        executedScripts.push(opts);
+        return [{ result: true }];
+      });
+
+      await injector.processStage(tabId, 0, targetUrl, 'document-start');
+
+      // Script A is now injected; Script B was already deduplicated and NOT re-injected
+      expect(executedScripts.length).toBe(2);
+      expect(executedScripts[1].args[2]).toBe('script-fail');
+      expect(injector.hasInjected(tabId, 0, 'script-fail', 'document-start')).toBe(true);
+      expect(injector.hasInjected(tabId, 0, 'script-succeed', 'document-start')).toBe(true);
+    });
+
+    it('M3.4.2: subframe failure rolls back only subframe', async () => {
+      const tabId = 401;
+
+      const subframeScript: ScriptRecord = {
+        id: 'subframe-rollback-script',
+        name: 'Subframe Rollback Script',
+        code: '// test',
+        metadata: {
+          name: 'Subframe Rollback Script',
+          matches: ['*://example.com/*'],
+          matchPatterns: ['*://example.com/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: [],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await deleteScript('sample-cdp-logger');
+      await saveScript(subframeScript);
+
+      // Frame 1 fails; Frame 2 succeeds
+      context.mockScripting.executeScript.mockImplementation(async (opts: any) => {
+        if (opts.target.frameIds?.includes(1)) {
+          throw new Error('Frame 1 detached');
+        }
+        executedScripts.push(opts);
+        return [{ result: true }];
+      });
+
+      // Frame 1 injection fails
+      await injector.handleCommitted({
+        tabId,
+        frameId: 1,
+        url: 'https://example.com/frame1',
+        processId: 1,
+        transitionType: 'auto_subframe',
+        timeStamp: Date.now()
+      });
+      expect(injector.hasInjected(tabId, 1, 'subframe-rollback-script', 'document-start')).toBe(false);
+
+      // Frame 2 injection succeeds
+      await injector.handleCommitted({
+        tabId,
+        frameId: 2,
+        url: 'https://example.com/frame2',
+        processId: 1,
+        transitionType: 'auto_subframe',
+        timeStamp: Date.now()
+      });
+      expect(injector.hasInjected(tabId, 2, 'subframe-rollback-script', 'document-start')).toBe(true);
+      expect(executedScripts.length).toBe(1);
+      expect(executedScripts[0].target.frameIds).toEqual([2]);
+    });
+
+    it('M3.4.3: syntax error in pageSandboxRunner rolls back dedupe key', async () => {
+      const tabId = 402;
+      const targetUrl = 'https://example.com/syntax-test';
+
+      // Verify pageSandboxRunner directly returns failure object on syntax error
+      const brokenCode = `// ==UserScript==
+// @name Syntax Error Script
+// @match *://example.com/syntax-test*
+// @run-at document-start
+// ==/UserScript==
+var x = ; // syntax error`;
+
+      const fixedCode = `// ==UserScript==
+// @name Syntax Error Script
+// @match *://example.com/syntax-test*
+// @run-at document-start
+// ==/UserScript==
+var x = 123; // valid code`;
+
+      const runnerRes = pageSandboxRunner(brokenCode, 'Syntax Error Script', 'syntax-err-script', {});
+      expect(runnerRes.success).toBe(false);
+      expect(runnerRes.error).toBeDefined();
+
+      // Now test complete pipeline rollback through executeScript & processStage
+      const brokenScript: ScriptRecord = {
+        id: 'syntax-err-script',
+        name: 'Syntax Error Script',
+        code: brokenCode,
+        metadata: {
+          name: 'Syntax Error Script',
+          matches: ['*://example.com/syntax-test*'],
+          matchPatterns: ['*://example.com/syntax-test*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: [],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await deleteScript('sample-cdp-logger');
+      await saveScript(brokenScript);
+
+      // Mock executeScript to simulate Chrome running pageSandboxRunner and returning its result
+      context.mockScripting.executeScript.mockImplementation(async (opts: any) => {
+        executedScripts.push(opts);
+        if (typeof opts.func === 'function') {
+          const res = opts.func(...opts.args);
+          return [{ result: res }];
+        }
+        return [{ result: true }];
+      });
+
+      await injector.handleCommitted({
+        tabId,
+        frameId: 0,
+        url: targetUrl,
+        processId: 1,
+        transitionType: 'link',
+        timeStamp: Date.now()
+      });
+
+      // Script execution should have failed and dedupe key must be rolled back
+      expect(injector.hasInjected(tabId, 0, 'syntax-err-script', 'document-start')).toBe(false);
+
+      // Now fix the script code and re-inject
+      const fixedScript = {
+        ...brokenScript,
+        code: fixedCode,
+        updatedAt: Date.now()
+      };
+      await saveScript(fixedScript);
+
+      await injector.processStage(tabId, 0, targetUrl, 'document-start');
+
+      // Fixed script should now successfully inject
+      expect(injector.hasInjected(tabId, 0, 'syntax-err-script', 'document-start')).toBe(true);
     });
   });
 });
