@@ -1856,7 +1856,7 @@ describe('Empirical Challenger M4-1: Content Script Bridge & Security Isolation'
 
         const error = await server.validateScriptPermissions(req, sender);
         expect(error).not.toBeNull();
-        expect(error?.data?.allowedDomains).toEqual(['DOM']);
+        expect((error?.data as any)?.allowedDomains).toEqual(['DOM']);
       });
 
       it('CDP-2.6.4: derives domains from script.metadata.cdp when cdpDeclarations is missing', async () => {
