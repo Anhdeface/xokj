@@ -521,6 +521,325 @@ describe('Feature 14: Content Script Message Bridge (bridge.ts)', () => {
 
       secureBridge.destroy();
     });
+
+    it('T4.4: drops message when event.origin does not match window.location.origin', async () => {
+      context.mockRuntime.sendMessage.mockClear();
+
+      // Message from untrusted foreign origin
+      await bridge.handlePageMessage({
+        source: window,
+        origin: 'https://evil-attacker.com',
+        data: {
+          type: 'CDP_RPC_REQUEST',
+          id: 'origin-spoof',
+          method: 'Page.navigate'
+        }
+      } as any);
+
+      expect(context.mockRuntime.sendMessage).not.toHaveBeenCalled();
+      expect(postedToWindow).toEqual([]);
+    });
+
+    it('T4.5: drops message when requireOrigin is true and origin is missing', async () => {
+      const strictOriginBridge = new ContentScriptBridge({
+        requireOrigin: true
+      });
+      strictOriginBridge.init();
+
+      await strictOriginBridge.handlePageMessage({
+        source: window,
+        // origin undefined
+        data: {
+          type: 'CDP_RPC_REQUEST',
+          id: 'missing-origin',
+          method: 'Page.navigate'
+        }
+      } as any);
+
+      expect(context.mockRuntime.sendMessage).not.toHaveBeenCalled();
+      strictOriginBridge.destroy();
+    });
+
+    it('T4.6: accepts message when origin matches configured allowedOrigin', async () => {
+      const customOriginBridge = new ContentScriptBridge({
+        allowedOrigin: 'https://trusted-site.com',
+        requireOrigin: true
+      });
+      customOriginBridge.init();
+
+      context.mockRuntime.sendMessage.mockImplementation(async (req: any, cb?: any) => {
+        const res = { type: 'CDP_RPC_RESPONSE', id: req.id, success: true };
+        cb?.(res);
+        return res;
+      });
+
+      // Wrong origin -> dropped
+      await customOriginBridge.handlePageMessage({
+        source: window,
+        origin: 'https://other-site.com',
+        data: {
+          type: 'CDP_RPC_REQUEST',
+          id: 'wrong-origin-test',
+          method: 'Page.enable'
+        }
+      } as any);
+      expect(context.mockRuntime.sendMessage).not.toHaveBeenCalled();
+
+      // Correct allowed origin -> processed
+      await customOriginBridge.handlePageMessage({
+        source: window,
+        origin: 'https://trusted-site.com',
+        data: {
+          type: 'CDP_RPC_REQUEST',
+          id: 'correct-origin-test',
+          method: 'Page.enable'
+        }
+      } as any);
+      expect(context.mockRuntime.sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'correct-origin-test' }),
+        expect.any(Function)
+      );
+
+      customOriginBridge.destroy();
+    });
+
+    it('T4.7: drops message when data.source is foreign / attacker spoof', async () => {
+      await bridge.handlePageMessage({
+        source: window,
+        data: {
+          type: 'CDP_RPC_REQUEST',
+          source: 'attacker-extension',
+          id: 'foreign-source',
+          method: 'Network.getCookies'
+        }
+      } as any);
+
+      expect(context.mockRuntime.sendMessage).not.toHaveBeenCalled();
+      expect(postedToWindow).toEqual([]);
+    });
+
+    it('T4.8: drops message when event.source is not window', async () => {
+      const fakeIframe = {} as any;
+      await bridge.handlePageMessage({
+        source: fakeIframe,
+        data: {
+          type: 'CDP_RPC_REQUEST',
+          id: 'iframe-msg',
+          method: 'Page.navigate'
+        }
+      } as any);
+
+      expect(context.mockRuntime.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('T4.9: generates cryptographically secure channelId prefixed with xokj_', () => {
+      const generated = bridge.getChannelId();
+      expect(generated).toMatch(/^xokj_[0-9a-fA-F-]+$/);
+      expect(generated.length).toBeGreaterThan(15);
+    });
+
+    it('T4.10: strips data.tabId before forwarding to background service worker (anti-spoofing)', async () => {
+      context.mockRuntime.sendMessage.mockImplementation(async (req: any, cb?: any) => {
+        const res = { type: 'CDP_RPC_RESPONSE', id: req.id, success: true };
+        cb?.(res);
+        return res;
+      });
+
+      await bridge.handlePageMessage({
+        source: window,
+        data: {
+          type: 'CDP_RPC_REQUEST',
+          id: 'strip-tab-test',
+          method: 'Page.enable',
+          tabId: 999999, // Attempted spoof of foreign tab ID
+          scriptId: 'script-1'
+        }
+      } as any);
+
+      expect(context.mockRuntime.sendMessage).toHaveBeenCalledWith(
+        {
+          type: 'CDP_RPC_REQUEST',
+          id: 'strip-tab-test',
+          method: 'Page.enable',
+          params: undefined,
+          scriptId: 'script-1'
+        },
+        expect.any(Function)
+      );
+    });
+
+    it('T4.11: echoes channelId and source in detachment draining responses', async () => {
+      const secureBridge = new ContentScriptBridge({
+        channelId: 'secure-token-drain',
+        requireChannelId: true
+      });
+      secureBridge.init();
+
+      context.mockRuntime.sendMessage.mockImplementation(async () => new Promise(() => {}));
+
+      secureBridge.handlePageMessage({
+        source: window,
+        data: {
+          type: 'CDP_RPC_REQUEST',
+          source: 'xokj-userscript',
+          channelId: 'secure-token-drain',
+          id: 'req-drain-token',
+          method: 'Page.navigate'
+        }
+      } as any);
+
+      postedToWindow = [];
+      secureBridge.handleDetached('target_closed');
+
+      expect(postedToWindow).toContainEqual(
+        expect.objectContaining({
+          type: 'CDP_RPC_RESPONSE',
+          id: 'req-drain-token',
+          source: 'xokj-bridge',
+          channelId: 'secure-token-drain',
+          success: false,
+          error: expect.objectContaining({ code: 1002 })
+        })
+      );
+
+      secureBridge.destroy();
+    });
+
+    it('T4.12: echoes channelId and source in conflict draining responses', async () => {
+      const secureBridge = new ContentScriptBridge({
+        channelId: 'secure-token-conflict',
+        requireChannelId: true
+      });
+      secureBridge.init();
+
+      context.mockRuntime.sendMessage.mockImplementation(async () => new Promise(() => {}));
+
+      secureBridge.handlePageMessage({
+        source: window,
+        data: {
+          type: 'CDP_RPC_REQUEST',
+          source: 'xokj-userscript',
+          channelId: 'secure-token-conflict',
+          id: 'req-conflict-token',
+          method: 'DOM.getDocument'
+        }
+      } as any);
+
+      postedToWindow = [];
+      secureBridge.handleConflict('canceled_by_user');
+
+      expect(postedToWindow).toContainEqual(
+        expect.objectContaining({
+          type: 'CDP_RPC_RESPONSE',
+          id: 'req-conflict-token',
+          source: 'xokj-bridge',
+          channelId: 'secure-token-conflict',
+          success: false,
+          error: expect.objectContaining({ code: 1001 })
+        })
+      );
+
+      secureBridge.destroy();
+    });
+
+    it('T4.13: wildcard allowedOrigin: "*" accepts requests from any origin', () => {
+      const wildcardBridge = new ContentScriptBridge({
+        allowedOrigin: '*',
+        requireOrigin: true
+      });
+      expect(wildcardBridge.verifyOrigin('https://example.com')).toBe(true);
+      expect(wildcardBridge.verifyOrigin('https://attacker.org')).toBe(true);
+      expect(wildcardBridge.verifyOrigin(undefined)).toBe(false);
+      wildcardBridge.destroy();
+    });
+
+    it('T4.14: origin array allowedOrigin accepts members and rejects non-members', () => {
+      const arrayBridge = new ContentScriptBridge({
+        allowedOrigin: ['https://alpha.com', 'https://beta.com'],
+        requireOrigin: true
+      });
+      expect(arrayBridge.verifyOrigin('https://alpha.com')).toBe(true);
+      expect(arrayBridge.verifyOrigin('https://beta.com')).toBe(true);
+      expect(arrayBridge.verifyOrigin('https://gamma.com')).toBe(false);
+      expect(arrayBridge.verifyOrigin(undefined)).toBe(false);
+      arrayBridge.destroy();
+    });
+
+    it('T4.15: bridge without options has requireChannelId: false and accepts requests without channelId', async () => {
+      const defaultBridge = new ContentScriptBridge();
+      defaultBridge.init();
+
+      context.mockRuntime.sendMessage.mockImplementation(async (req: any, cb?: any) => {
+        const res = { type: 'CDP_RPC_RESPONSE', id: req.id, success: true };
+        cb?.(res);
+        return res;
+      });
+
+      await defaultBridge.handlePageMessage({
+        source: window,
+        data: {
+          type: 'CDP_RPC_REQUEST',
+          id: 'no-channel-test',
+          method: 'Page.enable'
+        }
+      } as any);
+
+      expect(context.mockRuntime.sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'no-channel-test' }),
+        expect.any(Function)
+      );
+      defaultBridge.destroy();
+    });
+
+    it('T4.16: bridge with channelId defaults requireChannelId: true and drops requests without matching channelId', async () => {
+      const tokenBridge = new ContentScriptBridge({ channelId: 'secret-xyz' });
+      tokenBridge.init();
+
+      context.mockRuntime.sendMessage.mockImplementation(async (req: any, cb?: any) => {
+        const res = { type: 'CDP_RPC_RESPONSE', id: req.id, success: true };
+        cb?.(res);
+        return res;
+      });
+
+      // Without channelId -> dropped
+      await tokenBridge.handlePageMessage({
+        source: window,
+        data: {
+          type: 'CDP_RPC_REQUEST',
+          id: 'missing-token',
+          method: 'Page.enable'
+        }
+      } as any);
+      expect(context.mockRuntime.sendMessage).not.toHaveBeenCalled();
+
+      // With wrong channelId -> dropped
+      await tokenBridge.handlePageMessage({
+        source: window,
+        data: {
+          type: 'CDP_RPC_REQUEST',
+          channelId: 'wrong-token',
+          id: 'wrong-token-test',
+          method: 'Page.enable'
+        }
+      } as any);
+      expect(context.mockRuntime.sendMessage).not.toHaveBeenCalled();
+
+      // With correct channelId -> forwarded
+      await tokenBridge.handlePageMessage({
+        source: window,
+        data: {
+          type: 'CDP_RPC_REQUEST',
+          channelId: 'secret-xyz',
+          id: 'correct-token-test',
+          method: 'Page.enable'
+        }
+      } as any);
+      expect(context.mockRuntime.sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'correct-token-test' }),
+        expect.any(Function)
+      );
+      tokenBridge.destroy();
+    });
   });
 
   describe('Tier 5: Normal & Unexpected Detachment Invalidation (M2)', () => {

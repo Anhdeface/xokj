@@ -9,10 +9,12 @@ import type {
   CdpRpcEventMessage,
   CdpRpcLifecycleMessage,
   CdpRpcError,
-  DebuggerSessionStatus
+  DebuggerSessionStatus,
+  ScriptRecord
 } from '@/shared/types';
 import { DevToolsConflictError } from '@/shared/types';
-import { isRestrictedUrl } from '@/shared/match-pattern';
+import { isRestrictedUrl, matchesAny } from '@/shared/match-pattern';
+import { getScript } from '@/shared/storage';
 
 /**
  * Interface for optional TabDebuggerManager integration.
@@ -44,6 +46,10 @@ export interface CdpBridgeServerOptions {
   autoStart?: boolean;
   /** Optional TabDebuggerManager delegate */
   debuggerManager?: IDebuggerManager;
+  /** When true, requires scriptId on all requests from tabs */
+  enforcePermissions?: boolean;
+  /** Custom script lookup override */
+  scriptResolver?: (scriptId: string) => Promise<ScriptRecord | null>;
 }
 
 /**
@@ -64,6 +70,8 @@ export class CdpBridgeServer {
   private readonly protocolVersion: string;
   private readonly autoAttach: boolean;
   private readonly debuggerManager?: IDebuggerManager;
+  private enforcePermissions: boolean;
+  private readonly scriptResolver: (scriptId: string) => Promise<ScriptRecord | null>;
 
   private inflightRequests = new Map<string, InflightRequestEntry>();
   private tabRequests = new Map<number, Set<string>>();
@@ -81,6 +89,8 @@ export class CdpBridgeServer {
     this.protocolVersion = options.protocolVersion ?? '1.3';
     this.autoAttach = options.autoAttach ?? true;
     this.debuggerManager = options.debuggerManager;
+    this.enforcePermissions = options.enforcePermissions ?? false;
+    this.scriptResolver = options.scriptResolver ?? getScript;
 
     if (this.debuggerManager && typeof (this.debuggerManager as any).setInflightTracker === 'function') {
       (this.debuggerManager as any).setInflightTracker(this);
@@ -89,6 +99,13 @@ export class CdpBridgeServer {
     if (options.autoStart) {
       this.init();
     }
+  }
+
+  /**
+   * Toggles permission enforcement mode.
+   */
+  public setEnforcePermissions(enforce: boolean): void {
+    this.enforcePermissions = enforce;
   }
 
   /**
@@ -248,8 +265,159 @@ export class CdpBridgeServer {
       };
     }
 
-    // 5. Execute against sender's verified tab ID
+    // 5. Userscript Permission Validation (Feature 16)
+    if (request.scriptId || this.enforcePermissions) {
+      const permissionError = await this.validateScriptPermissions(request, sender);
+      if (permissionError) {
+        return {
+          type: 'CDP_RPC_RESPONSE',
+          id: reqId,
+          success: false,
+          error: permissionError
+        };
+      }
+    }
+
+    // 6. Execute against sender's verified tab ID
     return this.executeCommand(senderTabId, request.method, request.params, reqId);
+  }
+
+  /**
+   * Validates userscript credentials and CDP permissions against storage registry and tab context.
+   */
+  public async validateScriptPermissions(
+    request: CdpRpcRequest,
+    sender: chrome.runtime.MessageSender
+  ): Promise<CdpRpcError | null> {
+    const scriptId = request.scriptId;
+
+    // 1. Untagged request handling
+    if (!scriptId || typeof scriptId !== 'string' || scriptId.trim() === '') {
+      if (this.enforcePermissions) {
+        return {
+          code: 403,
+          message: 'Unauthorized CDP RPC: Missing userscript identifier (scriptId required)',
+          data: { reason: 'MISSING_SCRIPT_ID' }
+        };
+      }
+      return null;
+    }
+
+    const trimmedId = scriptId.trim();
+
+    // 2. Registry existence check
+    const script = await this.scriptResolver(trimmedId);
+    if (!script) {
+      return {
+        code: 403,
+        message: `Unauthorized CDP RPC: Script '${trimmedId}' not found in registry`,
+        data: { reason: 'SCRIPT_NOT_FOUND', scriptId: trimmedId }
+      };
+    }
+
+    // 3. Enabled status check
+    if (!script.enabled) {
+      return {
+        code: 403,
+        message: `Permission denied: Script '${script.name || trimmedId}' is disabled`,
+        data: { reason: 'SCRIPT_DISABLED', scriptId: trimmedId }
+      };
+    }
+
+    // 4. Tab URL match pattern & exclusion check
+    const tabUrl = sender.url || sender.tab?.url;
+    if (tabUrl && script.metadata) {
+      const excludes = script.metadata.excludes || [];
+      if (excludes.length > 0 && matchesAny(excludes, tabUrl)) {
+        return {
+          code: 403,
+          message: `Permission denied: Script '${script.name || trimmedId}' is excluded on '${tabUrl}'`,
+          data: { reason: 'URL_EXCLUDED', scriptId: trimmedId, url: tabUrl }
+        };
+      }
+
+      const patterns =
+        script.metadata.matches?.length
+          ? script.metadata.matches
+          : script.metadata.matchPatterns?.length
+          ? script.metadata.matchPatterns
+          : script.metadata.includes || [];
+
+      if (patterns.length > 0 && !matchesAny(patterns, tabUrl)) {
+        return {
+          code: 403,
+          message: `Permission denied: Script '${script.name || trimmedId}' is not authorized for URL '${tabUrl}'`,
+          data: { reason: 'URL_NOT_MATCHED', scriptId: trimmedId, url: tabUrl }
+        };
+      }
+    }
+
+    // 5. Grant and CDP directive check
+    const grants: string[] = Array.isArray(script.metadata?.grants) ? script.metadata.grants : [];
+    if (grants.includes('none')) {
+      return {
+        code: 403,
+        message: `Permission denied: Script '${script.name || trimmedId}' declared '@grant none' and has no CDP privileges`,
+        data: { reason: 'GRANT_NONE', scriptId: trimmedId }
+      };
+    }
+
+    const hasCdpGrant =
+      grants.includes('GM_cdp') ||
+      grants.includes('cdp') ||
+      grants.includes('*');
+
+    const cdpDecls = script.metadata?.cdpDeclarations || script.metadata?.cdp || [];
+    const hasCdpDirectives = Array.isArray(cdpDecls) && cdpDecls.length > 0;
+    const rawCdpDomains: string[] = Array.isArray(script.metadata?.cdpDomains) ? script.metadata.cdpDomains : [];
+
+    let cdpDomains = rawCdpDomains;
+    if (cdpDomains.length === 0 && Array.isArray(cdpDecls)) {
+      cdpDomains = cdpDecls
+        .map((d: any) => {
+          if (typeof d === 'string') {
+            return d.split('.')[0];
+          }
+          if (d && typeof d === 'object') {
+            return d.domain || (typeof d.command === 'string' ? d.command.split('.')[0] : undefined);
+          }
+          return undefined;
+        })
+        .filter((domain): domain is string => typeof domain === 'string' && domain.length > 0);
+      cdpDomains = Array.from(new Set(cdpDomains));
+    }
+    const hasCdpDomains = cdpDomains.length > 0;
+
+    if (!hasCdpGrant && !hasCdpDirectives && !hasCdpDomains) {
+      return {
+        code: 403,
+        message: `Permission denied: Script '${script.name || trimmedId}' has not requested @cdp or @grant GM_cdp permissions`,
+        data: { reason: 'NO_CDP_PERMISSIONS', scriptId: trimmedId }
+      };
+    }
+
+    // 6. Domain-level authorization check
+    if (hasCdpGrant) {
+      return null; // General grant authorizes all domains
+    }
+
+    const requestedDomain = request.method.split('.')[0];
+    const isDomainAllowed = cdpDomains.includes(requestedDomain) || cdpDomains.includes('*');
+
+    if (!isDomainAllowed) {
+      return {
+        code: 403,
+        message: `Permission denied: Script '${script.name || trimmedId}' is not authorized for CDP domain '${requestedDomain}'. Allowed domains: [${cdpDomains.join(', ')}]`,
+        data: {
+          reason: 'DOMAIN_NOT_AUTHORIZED',
+          scriptId: trimmedId,
+          requestedDomain,
+          allowedDomains: cdpDomains
+        }
+      };
+    }
+
+    return null;
   }
 
   /**

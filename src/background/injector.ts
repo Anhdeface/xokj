@@ -14,6 +14,7 @@ import type { TabDebuggerManager } from './debugger-mgr';
 export interface ScriptInjectorOptions {
   debuggerManager?: TabDebuggerManager;
   autoStart?: boolean;
+  channelId?: string;
 }
 
 /**
@@ -24,7 +25,8 @@ export function pageSandboxRunner(
   code: string,
   scriptName: string,
   scriptId: string,
-  metadata: Record<string, any>
+  metadata: Record<string, any>,
+  channelId?: string
 ): { success: boolean; error?: string } {
   try {
     const grants: string[] = Array.isArray(metadata?.grants) ? metadata.grants : [];
@@ -33,34 +35,148 @@ export function pageSandboxRunner(
     const hasCdpDomains = Array.isArray(metadata?.cdpDomains) && metadata.cdpDomains.length > 0;
     const isNoneGrant = grants.includes('none');
 
+    const allowAll = !isNoneGrant && grants.includes('*');
+
     // CDP capabilities allowed only if not @grant none and explicitly granted or declared
     const allowCdp =
       !isNoneGrant &&
-      (grants.includes('GM_cdp') ||
+      (allowAll ||
+        grants.includes('GM_cdp') ||
         grants.includes('cdp') ||
-        grants.includes('*') ||
         hasCdpDirectives ||
         hasCdpDomains);
 
     // GM_info allowed only if not @grant none and explicitly granted or declared.
-    // When @grant none or empty grants without CDP directives are declared, GM_info must NOT be exposed
     const allowGmInfo =
       !isNoneGrant &&
-      (grants.includes('GM_info') ||
-        grants.includes('*') ||
+      (allowAll ||
+        grants.includes('GM_info') ||
         (grants.length > 0 && allowCdp) ||
         (allowCdp && hasCdpDirectives));
 
-    const cdp = allowCdp
-      ? (window as any).cdp || (window as any).__xokj_cdp
+    const allowGmSetValue = !isNoneGrant && (allowAll || grants.includes('GM_setValue'));
+    const allowGmGetValue = !isNoneGrant && (allowAll || grants.includes('GM_getValue'));
+    const allowGmDeleteValue = !isNoneGrant && (allowAll || grants.includes('GM_deleteValue'));
+    const allowGmListValues = !isNoneGrant && (allowAll || grants.includes('GM_listValues'));
+    const allowGmAddStyle = !isNoneGrant && (allowAll || grants.includes('GM_addStyle'));
+    const allowGmLog = !isNoneGrant && (allowAll || grants.includes('GM_log'));
+
+    // In-memory isolated storage per script execution (never touches window.localStorage)
+    const scriptStore = new Map<string, string>();
+
+    const GM_setValue = allowGmSetValue
+      ? (key: string, value: unknown): void => {
+          scriptStore.set(key, JSON.stringify(value));
+        }
       : undefined;
 
-    const GM_cdp = allowCdp
-      ? typeof (window as any).GM_cdp === 'function'
-        ? (window as any).GM_cdp
-        : cdp && typeof cdp.send === 'function'
-        ? cdp.send.bind(cdp)
-        : undefined
+    const GM_getValue = allowGmGetValue
+      ? (key: string, defaultValue?: unknown): unknown => {
+          const raw = scriptStore.get(key);
+          if (raw === null || raw === undefined) return defaultValue;
+          try {
+            return JSON.parse(raw);
+          } catch {
+            return defaultValue;
+          }
+        }
+      : undefined;
+
+    const GM_deleteValue = allowGmDeleteValue
+      ? (key: string): void => {
+          scriptStore.delete(key);
+        }
+      : undefined;
+
+    const GM_listValues = allowGmListValues
+      ? (): string[] => {
+          return Array.from(scriptStore.keys());
+        }
+      : undefined;
+
+    const GM_addStyle = allowGmAddStyle
+      ? (css: string): HTMLStyleElement | null => {
+          if (typeof document === 'undefined') return null;
+          const style = document.createElement('style');
+          style.setAttribute('type', 'text/css');
+          style.setAttribute('data-xokj-script', scriptId || 'script');
+          style.textContent = css;
+          const target = document.head || document.documentElement || document.body;
+          if (target) {
+            target.appendChild(style);
+          }
+          return style;
+        }
+      : undefined;
+
+    const GM_log = allowGmLog
+      ? (...args: any[]): void => {
+          console.log(`[${scriptName || 'XOKJ'}]`, ...args);
+        }
+      : undefined;
+
+    let cdp: any = undefined;
+    if (allowCdp) {
+      // Feature 17: Strictly construct self-contained CDP client inside execution closure.
+      // Host page globals (window.cdp, window.__xokj_cdp, window.GM_cdp) are strictly ignored to prevent hijacking.
+      cdp = {
+        send: (method: string, params?: Record<string, unknown>): Promise<any> => {
+          return new Promise((resolve, reject) => {
+            const reqId = `xokj_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+            let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+
+            const cleanup = () => {
+              if (timeoutTimer) {
+                clearTimeout(timeoutTimer);
+                timeoutTimer = undefined;
+              }
+              window.removeEventListener('message', listener);
+            };
+
+            const listener = (event: MessageEvent) => {
+              if (event.source !== window || !event.data || event.data.type !== 'CDP_RPC_RESPONSE') return;
+              if (event.data.id === reqId) {
+                cleanup();
+                if (event.data.success) {
+                  resolve(event.data.result);
+                } else {
+                  reject(new Error(event.data.error?.message || 'CDP command failed'));
+                }
+              }
+            };
+
+            timeoutTimer = setTimeout(() => {
+              cleanup();
+              reject(new Error(`CDP request timed out after 30000ms: ${method} (${reqId})`));
+            }, 30000);
+
+            window.addEventListener('message', listener);
+
+            const effectiveChannelId = channelId || (metadata && metadata.channelId);
+            const rpcPayload: Record<string, any> = {
+              source: 'xokj-userscript',
+              type: 'CDP_RPC_REQUEST',
+              id: reqId,
+              scriptId,
+              method,
+              params: params || {}
+            };
+            if (effectiveChannelId) {
+              rpcPayload.channelId = effectiveChannelId;
+            }
+
+            window.postMessage(rpcPayload, '*');
+          });
+        },
+        on: (_event: string, _handler: Function) => () => {},
+        off: (_event: string, _handler: Function) => {},
+        getStatus: () => ({ status: 'ATTACHED', conflict: false }),
+        isAttached: () => true
+      };
+    }
+
+    const GM_cdp = allowCdp && cdp && typeof cdp.send === 'function'
+      ? cdp.send.bind(cdp)
       : undefined;
 
     const GM_info = allowGmInfo
@@ -76,12 +192,33 @@ export function pageSandboxRunner(
         }
       : undefined;
 
-    const wrapped = `(function(cdp, GM_cdp, GM_info) {\n${code}\n})(__cdp, __GM_cdp, __GM_info);\n//# sourceURL=xokj://${encodeURIComponent(
+    const wrapped = `(function(cdp, GM_cdp, GM_info, GM_setValue, GM_getValue, GM_deleteValue, GM_listValues, GM_addStyle, GM_log) {\n${code}\n})(__cdp, __GM_cdp, __GM_info, __GM_setValue, __GM_getValue, __GM_deleteValue, __GM_listValues, __GM_addStyle, __GM_log);\n//# sourceURL=xokj://${encodeURIComponent(
       scriptName
     )}.user.js`;
 
-    const runFn = new Function('__cdp', '__GM_cdp', '__GM_info', wrapped);
-    runFn(cdp, GM_cdp, GM_info);
+    const runFn = new Function(
+      '__cdp',
+      '__GM_cdp',
+      '__GM_info',
+      '__GM_setValue',
+      '__GM_getValue',
+      '__GM_deleteValue',
+      '__GM_listValues',
+      '__GM_addStyle',
+      '__GM_log',
+      wrapped
+    );
+    runFn(
+      cdp,
+      GM_cdp,
+      GM_info,
+      GM_setValue,
+      GM_getValue,
+      GM_deleteValue,
+      GM_listValues,
+      GM_addStyle,
+      GM_log
+    );
     return { success: true };
   } catch (err: any) {
     console.error(`[XOKJ Injector] Error running userscript "${scriptName}" (${scriptId}):`, err);
@@ -91,6 +228,7 @@ export function pageSandboxRunner(
 
 export class ScriptInjector {
   private debuggerManager?: TabDebuggerManager;
+  private channelId?: string;
   private isListening = false;
 
   // Feature 11: Two-level nested injection deduplication map:
@@ -117,9 +255,18 @@ export class ScriptInjector {
 
   constructor(options: ScriptInjectorOptions = {}) {
     this.debuggerManager = options.debuggerManager;
+    this.channelId = options.channelId;
     if (options.autoStart) {
       this.init();
     }
+  }
+
+  public setChannelId(channelId: string): void {
+    this.channelId = channelId;
+  }
+
+  public getChannelId(): string | undefined {
+    return this.channelId;
   }
 
   /**
@@ -599,12 +746,13 @@ export class ScriptInjector {
 
     const executionPromise = (async (): Promise<boolean> => {
       if (typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+        const scriptChannelId = (script as any).channelId || this.channelId || undefined;
         const results = await chrome.scripting.executeScript({
           target: { tabId, frameIds: [frameId] },
           world: 'MAIN',
           injectImmediately: stage === 'document-start',
           func: pageSandboxRunner,
-          args: [script.code, script.name, script.id, script.metadata || {}]
+          args: [script.code, script.name, script.id, script.metadata || {}, scriptChannelId]
         });
 
         if (results && results.length > 0) {

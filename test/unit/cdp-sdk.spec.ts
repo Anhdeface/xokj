@@ -6,7 +6,14 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { CdpClient, CdpClientSdk, createGmCdp, createGmApi } from '@/content/cdp-sdk';
+import {
+  CdpClient,
+  CdpClientSdk,
+  createGmCdp,
+  createGmApi,
+  clearIsolatedGmStorage,
+  getIsolatedScriptStore
+} from '@/content/cdp-sdk';
 import { buildSandboxScope, createSandboxRunner } from '@/content/sandbox';
 import { DevToolsConflictError } from '@/shared/types';
 import type { ScriptRecord } from '@/shared/types';
@@ -17,6 +24,10 @@ describe('Feature 15: Userscript Runtime SDK (cdp-sdk.ts)', () => {
 
   beforeEach(() => {
     postedMessages = [];
+    clearIsolatedGmStorage();
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.clear();
+    }
     vi.stubGlobal('postMessage', (msg: any) => {
       postedMessages.push(msg);
     });
@@ -351,6 +362,129 @@ describe('Feature 15: Userscript Runtime SDK (cdp-sdk.ts)', () => {
       expect(api.GM_info.script.name).toBe('Info Script');
       expect(api.GM_info.script.version).toBe('3.1.4');
       expect(api.GM_info.scriptHandler).toBe('XOKJ');
+    });
+
+    it('T4.5: GM storage never reads from or writes to webpage window.localStorage', () => {
+      const script: ScriptRecord = {
+        id: 'zero-ls-script',
+        name: 'Zero LS Script',
+        code: '',
+        metadata: {} as any,
+        enabled: true,
+        createdAt: 0,
+        updatedAt: 0
+      };
+
+      const api = createGmApi(script, sdk) as any;
+      api.GM_setValue('secretKey', 'super_secret_value');
+      api.GM_setValue('userProfile', { id: 101, role: 'admin' });
+
+      expect(api.GM_getValue('secretKey')).toBe('super_secret_value');
+      expect(api.GM_getValue('userProfile')).toEqual({ id: 101, role: 'admin' });
+
+      // Verify webpage localStorage is completely untouched
+      if (typeof window !== 'undefined' && window.localStorage) {
+        expect(window.localStorage.length).toBe(0);
+        expect(window.localStorage.getItem('__xokj_zero-ls-script_secretKey')).toBeNull();
+        expect(window.localStorage.getItem('secretKey')).toBeNull();
+      }
+    });
+
+    it('T4.6: GM storage is immune to webpage localStorage tampering and clear()', () => {
+      const script: ScriptRecord = {
+        id: 'tamper-resistant-script',
+        name: 'Tamper Resistant',
+        code: '',
+        metadata: {} as any,
+        enabled: true,
+        createdAt: 0,
+        updatedAt: 0
+      };
+
+      const api = createGmApi(script, sdk) as any;
+      api.GM_setValue('token', 'real_auth_token');
+
+      // Webpage attempts to tamper with or clear localStorage
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem('__xokj_tamper-resistant-script_token', 'attacker_payload');
+        window.localStorage.clear();
+      }
+
+      // Script storage remains pure and untouched
+      expect(api.GM_getValue('token')).toBe('real_auth_token');
+    });
+
+    it('T4.7: re-instantiating createGmApi for same script.id accesses same isolated partition', () => {
+      const scriptA: ScriptRecord = {
+        id: 'persistent-id-1',
+        name: 'Instance A',
+        code: '',
+        metadata: {} as any,
+        enabled: true,
+        createdAt: 0,
+        updatedAt: 0
+      };
+      const scriptB: ScriptRecord = {
+        id: 'persistent-id-1',
+        name: 'Instance B',
+        code: '',
+        metadata: {} as any,
+        enabled: true,
+        createdAt: 0,
+        updatedAt: 0
+      };
+
+      const apiA = createGmApi(scriptA, sdk) as any;
+      apiA.GM_setValue('sharedKey', 'partition_value');
+
+      const apiB = createGmApi(scriptB, sdk) as any;
+      expect(apiB.GM_getValue('sharedKey')).toBe('partition_value');
+    });
+
+    it('T4.8: correctly serializes and deserializes rich data types (nested objects, arrays, numbers, booleans, null)', () => {
+      const script: ScriptRecord = {
+        id: 'type-fidelity-script',
+        name: 'Type Fidelity',
+        code: '',
+        metadata: {} as any,
+        enabled: true,
+        createdAt: 0,
+        updatedAt: 0
+      };
+
+      const api = createGmApi(script, sdk) as any;
+      const richData = {
+        num: 42.5,
+        bool: true,
+        str: 'hello',
+        nil: null,
+        arr: [1, 'two', { three: 3 }],
+        nested: { a: { b: { c: [true, false] } } }
+      };
+
+      api.GM_setValue('rich', richData);
+      expect(api.GM_getValue('rich')).toEqual(richData);
+      expect(api.GM_getValue('non_existent', 'default_fallback')).toBe('default_fallback');
+    });
+
+    it('T4.9: clearIsolatedGmStorage prunes specific script or all partitions', () => {
+      const s1: ScriptRecord = { id: 's-1', name: 'S1', code: '', metadata: {} as any, enabled: true, createdAt: 0, updatedAt: 0 };
+      const s2: ScriptRecord = { id: 's-2', name: 'S2', code: '', metadata: {} as any, enabled: true, createdAt: 0, updatedAt: 0 };
+
+      const api1 = createGmApi(s1, sdk) as any;
+      const api2 = createGmApi(s2, sdk) as any;
+
+      api1.GM_setValue('k1', 'v1');
+      api2.GM_setValue('k2', 'v2');
+
+      // Clear only s1
+      clearIsolatedGmStorage('s-1');
+      expect(api1.GM_getValue('k1')).toBeUndefined();
+      expect(api2.GM_getValue('k2')).toBe('v2');
+
+      // Clear all
+      clearIsolatedGmStorage();
+      expect(api2.GM_getValue('k2')).toBeUndefined();
     });
   });
 

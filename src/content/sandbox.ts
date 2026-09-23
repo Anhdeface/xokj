@@ -9,6 +9,18 @@
 import type { ScriptRecord, RunAtTiming } from '@/shared/types';
 import { CdpClient, createGmApi } from './cdp-sdk';
 
+export const PRIVILEGED_API_KEYS = [
+  'cdp',
+  'GM_cdp',
+  'GM_info',
+  'GM_setValue',
+  'GM_getValue',
+  'GM_deleteValue',
+  'GM_listValues',
+  'GM_addStyle',
+  'GM_log'
+] as const;
+
 /**
  * Builds the isolated sandbox variable scope based on declared @grant and @cdp directives.
  */
@@ -17,12 +29,7 @@ export function buildSandboxScope(
   cdpClient: CdpClient
 ): Record<string, unknown> {
   const grants = script.metadata?.grants || [];
-  const cdpDeclarations =
-    script.metadata?.cdpDeclarations ||
-    script.metadata?.cdp ||
-    script.metadata?.cdpDomains ||
-    [];
-  const allApi = createGmApi(script, cdpClient);
+  const isGrantNone = grants.includes('none');
 
   const baseGlobals: Record<string, unknown> = {
     window: typeof window !== 'undefined' ? window : globalThis,
@@ -30,15 +37,26 @@ export function buildSandboxScope(
     console: typeof console !== 'undefined' ? console : undefined
   };
 
-  const hasCdpDirectives = Array.isArray(cdpDeclarations) && cdpDeclarations.length > 0;
-  const isGrantNone = grants.includes('none');
-
-  // If @grant none is declared, or if no grants are declared and no CDP directives exist:
-  // Strictly return baseGlobals with no GM_* or CDP APIs exposed in scope.
-  if ((isGrantNone || grants.length === 0) && !hasCdpDirectives) {
+  // If @grant none is declared, strictly return baseGlobals with zero privileged APIs exposed.
+  if (isGrantNone) {
     return baseGlobals;
   }
 
+  const cdpDeclarations =
+    script.metadata?.cdpDeclarations ||
+    script.metadata?.cdp ||
+    script.metadata?.cdpDomains ||
+    [];
+  const hasCdpDirectives = Array.isArray(cdpDeclarations) && cdpDeclarations.length > 0;
+  const hasCdpDomains = Array.isArray(script.metadata?.cdpDomains) && script.metadata.cdpDomains.length > 0;
+
+  // If no grants are declared and no CDP directives exist:
+  // Strictly return baseGlobals with no GM_* or CDP APIs exposed in scope.
+  if (grants.length === 0 && !hasCdpDirectives && !hasCdpDomains) {
+    return baseGlobals;
+  }
+
+  const allApi = createGmApi(script, cdpClient);
   const scope: Record<string, unknown> = {
     ...baseGlobals
   };
@@ -62,11 +80,11 @@ export function buildSandboxScope(
 
   // Populate CDP capabilities if explicitly requested or declared via @cdp
   const hasCdpGrant =
-    !isGrantNone &&
-    (grants.includes('GM_cdp') ||
-      grants.includes('cdp') ||
-      grants.includes('*') ||
-      hasCdpDirectives);
+    grants.includes('GM_cdp') ||
+    grants.includes('cdp') ||
+    grants.includes('*') ||
+    hasCdpDirectives ||
+    hasCdpDomains;
 
   if (hasCdpGrant) {
     scope['GM_cdp'] = allApi['GM_cdp'];
@@ -78,13 +96,22 @@ export function buildSandboxScope(
 
 /**
  * Wraps script source in strict function execution context with source map URL.
+ * Explicitly shadows all 9 standard privileged keys with undefined when ungranted.
  */
 export function createSandboxRunner(
   script: ScriptRecord,
   scope: Record<string, unknown>
 ): () => unknown {
-  const paramNames = Object.keys(scope);
-  const paramValues = Object.values(scope);
+  const effectiveScope: Record<string, unknown> = { ...scope };
+
+  for (const key of PRIVILEGED_API_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(effectiveScope, key)) {
+      effectiveScope[key] = undefined;
+    }
+  }
+
+  const paramNames = Object.keys(effectiveScope);
+  const paramValues = Object.values(effectiveScope);
 
   const cleanName = encodeURIComponent((script.name || 'userscript').trim().replace(/\s+/g, '_'));
   const sourceUrl = `\n//# sourceURL=xokj://scripts/${cleanName}.user.js\n`;

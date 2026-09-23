@@ -58,6 +58,45 @@ The server restarted. Please resume teamwork_preview and the project orchestrato
 
 USER DIRECTIVE: Complete Milestone 3 (Injection Pipeline & Navigation Lifecycle), verify all M3 challenger tests pass 100%, create a clean git checkpoint / commit for Milestone 3, and then STOP execution without proceeding to Milestone 4. Provide a full final summary of Milestone 1, 2, and 3 achievements upon completion.
 
+## Follow-up — 2026-09-23T05:21:32Z
 
+Server restarted. Please resume teamwork_preview to complete Milestone 3 verification, verify all 394 tests pass, create the git checkpoint commit for Milestone 3, and provide the final report as requested. All files in .agents/ are preserved.
 
+## Follow-up — 2026-09-23T05:30:30Z
 
+This is a single self-contained fix; keep it small and focused. Implement Milestone 4: Content Script Bridge & Security Isolation for the XOKJ Userscript Manager extension codebase.
+
+Working directory: /home/quanh/Documents/xokj
+Integrity mode: development
+
+## Requirements
+
+### R1. Bridge RPC Channel Token & Origin Security (Feature 15)
+- Enforce strict channel validation and message source/origin checks in `ContentScriptBridge` (`src/content/bridge.ts`).
+- Require and verify secret `channelId` for all `CDP_RPC_REQUEST` messages from the webpage Main World to prevent unauthenticated/foreign scripts from accessing the bridge.
+
+### R2. Background Userscript Permission Validation (Feature 16)
+- In `CdpBridgeServer.processRpcRequest` (`src/background/cdp-bridge.ts`), validate that requests originating from userscripts contain valid script credentials/metadata confirming granted `@cdp` or `@grant` permissions prior to executing any CDP commands.
+
+### R3. Main-World CDP SDK Injection & Closure Binding (Feature 17)
+- In `src/content/sandbox.ts` and `src/background/injector.ts`, bind `cdp`, `GM_cdp`, and `GM_*` APIs directly inside the userscript execution closure instead of relying on mutable or unpopulated global objects (`window.cdp`).
+- Respect declared `@grant` and `@cdp` directives when constructing the sandbox scope.
+
+### R4. Secure Extension GM Storage (Feature 18)
+- Update `createGmApi` in `src/content/cdp-sdk.ts` to ensure userscript key-value storage (`GM_setValue`, `GM_getValue`, `GM_deleteValue`, `GM_listValues`) is isolated and does not expose private userscript data to standard unpartitioned webpage `window.localStorage`.
+
+## Acceptance Criteria
+
+### Security & Verification Guardrails
+- [ ] `ContentScriptBridge` drops and rejects any window messages lacking a valid matching `channelId` or having invalid origins.
+- [ ] `CdpBridgeServer` enforces authorization checks against script permissions before sending CDP debugger commands.
+- [ ] Userscript sandbox closure provides strict isolation, ensuring `@grant none` scripts receive zero privileged APIs, while granted scripts receive properly bound `cdp`/`GM_cdp`/`GM_*` instances.
+- [ ] `createGmApi` storage operations do not pollute or read from vulnerable webpage `localStorage`.
+- [ ] Comprehensive unit tests for M4 features are added/updated in `test/unit/content-bridge.spec.ts`, `test/unit/cdp-sdk.spec.ts`, and `test/unit/sandbox.spec.ts` (or new test files).
+- [ ] All existing and new tests pass cleanly with `npx vitest run --no-file-parallelism` (394+ tests, 0 failures).
+- [ ] TypeScript compilation succeeds with zero errors (`npx tsc --noEmit`).
+- [ ] `PROJECT.md` is updated to mark Milestone 4 as `DONE`.
+
+## Follow-up — 2026-09-23T06:26:14Z
+
+The server has restarted. All agent state in `.agents/` is intact. Please resume teamwork_preview execution from your current state in `.agents/orchestrator_1/progress.md` (Milestone 4: Content Script Bridge & Security Isolation, Iteration 2). Check on your subagents' status, re-dispatch/resume orchestrator, workers, reviewers, challengers, and auditors as needed, and drive Milestone 4 to completion and victory audit.

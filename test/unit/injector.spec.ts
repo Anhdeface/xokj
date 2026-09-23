@@ -539,6 +539,232 @@ describe('Feature 16: Lifecycle-based Script Injection (injector.ts)', () => {
       delete (window as any).cdp;
       delete (window as any).__probeGrantedResults;
     });
+
+    it('T5.3: userscript declaring @grant GM_setValue in pageSandboxRunner sets and gets values in isolated memory without touching window.localStorage', () => {
+      (window as any).__probeStorage = undefined;
+
+      const code = `
+        GM_setValue('test_key', { foo: 'bar', count: 99 });
+        const val = GM_getValue('test_key');
+        const list = GM_listValues();
+        GM_deleteValue('test_key');
+        const afterDelete = GM_getValue('test_key', 'fallback');
+        window.__probeStorage = { val, list, afterDelete };
+      `;
+
+      const res = pageSandboxRunner(code, 'Storage Test', 'storage-test-id', {
+        grants: ['GM_setValue', 'GM_getValue', 'GM_deleteValue', 'GM_listValues']
+      });
+
+      expect(res.success).toBe(true);
+      const probe = (window as any).__probeStorage;
+      expect(probe.val).toEqual({ foo: 'bar', count: 99 });
+      expect(probe.list).toEqual(['test_key']);
+      expect(probe.afterDelete).toBe('fallback');
+
+      if (typeof window !== 'undefined' && window.localStorage) {
+        expect(window.localStorage.length).toBe(0);
+      }
+      delete (window as any).__probeStorage;
+    });
+
+    it('T5.4: userscript declaring @grant cdp in pageSandboxRunner receives functional cdp client even when window.cdp is deleted/unpopulated', () => {
+      delete (window as any).cdp;
+      delete (window as any).__xokj_cdp;
+
+      const code = `
+        window.__cdpProbe = {
+          type: typeof cdp,
+          hasSend: typeof cdp !== 'undefined' && typeof cdp.send === 'function',
+          hasOn: typeof cdp !== 'undefined' && typeof cdp.on === 'function',
+          isAttached: typeof cdp !== 'undefined' && typeof cdp.isAttached === 'function' ? cdp.isAttached() : false
+        };
+      `;
+
+      const res = pageSandboxRunner(code, 'CDP Test', 'cdp-test-id', {
+        grants: ['cdp']
+      });
+
+      expect(res.success).toBe(true);
+      const probe = (window as any).__cdpProbe;
+      expect(probe.type).toBe('object');
+      expect(probe.hasSend).toBe(true);
+      expect(probe.hasOn).toBe(true);
+      expect(probe.isAttached).toBe(true);
+
+      delete (window as any).__cdpProbe;
+    });
+
+    it('T5.5: userscript declaring @grant none in pageSandboxRunner shadows host page globals', () => {
+      (window as any).cdp = { send: vi.fn(), foreign: true };
+      (window as any).GM_cdp = vi.fn();
+      (window as any).GM_setValue = vi.fn();
+      (window as any).GM_addStyle = vi.fn();
+      (window as any).GM_log = vi.fn();
+
+      const code = `
+        window.__shadowProbe = {
+          cdp: typeof cdp,
+          GM_cdp: typeof GM_cdp,
+          GM_setValue: typeof GM_setValue,
+          GM_getValue: typeof GM_getValue,
+          GM_deleteValue: typeof GM_deleteValue,
+          GM_listValues: typeof GM_listValues,
+          GM_addStyle: typeof GM_addStyle,
+          GM_log: typeof GM_log,
+          GM_info: typeof GM_info
+        };
+      `;
+
+      const res = pageSandboxRunner(code, 'Shadow Script', 'shadow-id', {
+        grants: ['none']
+      });
+
+      expect(res.success).toBe(true);
+      const probe = (window as any).__shadowProbe;
+      expect(probe.cdp).toBe('undefined');
+      expect(probe.GM_cdp).toBe('undefined');
+      expect(probe.GM_setValue).toBe('undefined');
+      expect(probe.GM_getValue).toBe('undefined');
+      expect(probe.GM_deleteValue).toBe('undefined');
+      expect(probe.GM_listValues).toBe('undefined');
+      expect(probe.GM_addStyle).toBe('undefined');
+      expect(probe.GM_log).toBe('undefined');
+      expect(probe.GM_info).toBe('undefined');
+
+      delete (window as any).cdp;
+      delete (window as any).GM_cdp;
+      delete (window as any).GM_setValue;
+      delete (window as any).GM_addStyle;
+      delete (window as any).GM_log;
+      delete (window as any).__shadowProbe;
+    });
+
+    it('T5.6: userscript declaring @grant cdp ignores malicious window.cdp and window.GM_cdp host globals', () => {
+      const maliciousSend = vi.fn();
+      const maliciousGmCdp = vi.fn();
+      (window as any).cdp = { send: maliciousSend, poisoned: true };
+      (window as any).GM_cdp = maliciousGmCdp;
+
+      const code = `
+        window.__cdpHostProbe = {
+          isPoisoned: Boolean(cdp && cdp.poisoned),
+          isHostSend: Boolean(cdp && window.cdp && cdp.send === window.cdp.send),
+          isHostGmCdp: Boolean(GM_cdp && window.GM_cdp && GM_cdp === window.GM_cdp)
+        };
+      `;
+
+      const res = pageSandboxRunner(code, 'Host Poison Script', 'host-poison-id', {
+        grants: ['cdp', 'GM_cdp']
+      });
+
+      expect(res.success).toBe(true);
+      const probe = (window as any).__cdpHostProbe;
+      expect(probe.isPoisoned).toBe(false);
+      expect(probe.isHostSend).toBe(false);
+      expect(probe.isHostGmCdp).toBe(false);
+
+      delete (window as any).cdp;
+      delete (window as any).GM_cdp;
+      delete (window as any).__cdpHostProbe;
+    });
+
+    it('T5.7: pageSandboxRunner attaches channelId to CDP_RPC_REQUEST when provided via parameter or metadata', () => {
+      const posted: any[] = [];
+      const originalPostMessage = window.postMessage;
+      window.postMessage = (msg: any) => {
+        posted.push(msg);
+      };
+
+      try {
+        const code = `
+          cdp.send('Page.enable', {});
+        `;
+
+        // 1. ChannelId via 5th argument
+        pageSandboxRunner(code, 'Channel Param Script', 'chan-param-id', { grants: ['cdp'] }, 'chan-param-token');
+        expect(posted.length).toBe(1);
+        expect(posted[0].channelId).toBe('chan-param-token');
+
+        // 2. ChannelId via metadata
+        pageSandboxRunner(code, 'Channel Meta Script', 'chan-meta-id', { grants: ['cdp'], channelId: 'chan-meta-token' });
+        expect(posted.length).toBe(2);
+        expect(posted[1].channelId).toBe('chan-meta-token');
+      } finally {
+        window.postMessage = originalPostMessage;
+      }
+    });
+
+    it('T5.8: pageSandboxRunner cdp.send cleans up listener and rejects after 30s timeout', async () => {
+      vi.useFakeTimers();
+      let capturedPromise: Promise<any> | undefined;
+
+      const code = `
+        window.__timeoutTestPromise = cdp.send('Page.enable', {});
+      `;
+
+      pageSandboxRunner(code, 'Timeout Script', 'timeout-id', { grants: ['cdp'] });
+      capturedPromise = (window as any).__timeoutTestPromise;
+      expect(capturedPromise).toBeDefined();
+
+      const rejectSpy = vi.fn();
+      capturedPromise!.catch(rejectSpy);
+
+      // Fast-forward 29 seconds - should not reject yet
+      await vi.advanceTimersByTimeAsync(29000);
+      expect(rejectSpy).not.toHaveBeenCalled();
+
+      // Fast-forward past 30 seconds - should reject with timeout error
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(rejectSpy).toHaveBeenCalledTimes(1);
+      expect(rejectSpy.mock.calls[0][0].message).toMatch(/timed out after 30000ms/);
+
+      delete (window as any).__timeoutTestPromise;
+      vi.useRealTimers();
+    });
+
+    it('T5.9: ScriptInjector wires channelId into chrome.scripting.executeScript args', async () => {
+      injector.setChannelId('custom-tab-channel');
+
+      const testScript: ScriptRecord = {
+        id: 'channel-wire-test',
+        name: 'Channel Wire Test',
+        code: '// ==UserScript==\n// @name Channel Wire Test\n// ==/UserScript==',
+        metadata: {
+          name: 'Channel Wire Test',
+          matches: ['*://example.com/*'],
+          matchPatterns: ['*://example.com/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-idle',
+          grants: ['cdp'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: ['Page'],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await saveScript(testScript);
+
+      await injector.handleCompleted({
+        tabId: 99,
+        frameId: 0,
+        url: 'https://example.com/test',
+        processId: 1,
+        timeStamp: Date.now()
+      });
+
+      const call = executedScripts.find((s) => s.args[2] === 'channel-wire-test');
+      expect(call).toBeDefined();
+      expect(call.args[4]).toBe('custom-tab-channel');
+    });
   });
 
   // =========================================================================

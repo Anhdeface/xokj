@@ -165,6 +165,33 @@ export interface CdpRpcRequest {
 }
 
 /**
+ * Window RPC Request sent from Userscript in Main World to ContentScriptBridge.
+ */
+export interface CdpRpcWindowRequest {
+  source: 'xokj-userscript';
+  channelId: string;
+  type: 'CDP_RPC_REQUEST';
+  id: string;
+  method: string;
+  params?: Record<string, unknown>;
+  scriptId?: string;
+  tabId?: number;
+}
+
+/**
+ * Window RPC Response sent from ContentScriptBridge to Userscript in Main World.
+ */
+export interface CdpRpcWindowResponse {
+  source: 'xokj-bridge';
+  channelId: string;
+  type: 'CDP_RPC_RESPONSE';
+  id: string;
+  success: boolean;
+  result?: unknown;
+  error?: CdpRpcError;
+}
+
+/**
  * Error structure returned when a CDP RPC invocation fails.
  */
 export interface CdpRpcError {

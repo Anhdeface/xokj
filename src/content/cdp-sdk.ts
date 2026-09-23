@@ -441,55 +441,53 @@ export function createGmCdp(cdp: CdpClient) {
 }
 
 /**
+ * Partitioned in-memory storage for userscripts, strictly isolating userscript state
+ * from webpage localStorage and other scripts.
+ */
+const isolatedScriptStorage = new Map<string, Map<string, string>>();
+
+/**
+ * Clears isolated GM storage for a specific scriptId or all scripts.
+ */
+export function clearIsolatedGmStorage(scriptId?: string): void {
+  if (scriptId) {
+    const store = isolatedScriptStorage.get(scriptId);
+    if (store) {
+      store.clear();
+    }
+    isolatedScriptStorage.delete(scriptId);
+  } else {
+    for (const store of isolatedScriptStorage.values()) {
+      store.clear();
+    }
+    isolatedScriptStorage.clear();
+  }
+}
+
+/**
+ * Returns the isolated in-memory key-value store for a specific scriptId.
+ */
+export function getIsolatedScriptStore(scriptId: string): Map<string, string> {
+  let store = isolatedScriptStorage.get(scriptId);
+  if (!store) {
+    store = new Map<string, string>();
+    isolatedScriptStorage.set(scriptId, store);
+  }
+  return store;
+}
+
+/**
  * Constructs standard GM_* helper APIs for a given script.
  */
 export function createGmApi(script: ScriptRecord, cdp: CdpClient): Record<string, unknown> {
-  const prefix = `__xokj_${script.id || 'script'}_`;
-
-  // Memory store fallback if localStorage is inaccessible
-  const memoryStore = new Map<string, string>();
-
-  const storageGet = (k: string): string | null => {
-    try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        return window.localStorage.getItem(prefix + k);
-      }
-    } catch {
-      // Inaccessible
-    }
-    return memoryStore.get(prefix + k) ?? null;
-  };
-
-  const storageSet = (k: string, v: string): void => {
-    try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        window.localStorage.setItem(prefix + k, v);
-        return;
-      }
-    } catch {
-      // Inaccessible
-    }
-    memoryStore.set(prefix + k, v);
-  };
-
-  const storageDelete = (k: string): void => {
-    try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        window.localStorage.removeItem(prefix + k);
-        return;
-      }
-    } catch {
-      // Inaccessible
-    }
-    memoryStore.delete(prefix + k);
-  };
+  const scriptId = script.id || 'script';
 
   const GM_setValue = (key: string, value: unknown): void => {
-    storageSet(key, JSON.stringify(value));
+    getIsolatedScriptStore(scriptId).set(key, JSON.stringify(value));
   };
 
   const GM_getValue = (key: string, defaultValue?: unknown): unknown => {
-    const raw = storageGet(key);
+    const raw = getIsolatedScriptStore(scriptId).get(key);
     if (raw === null || raw === undefined) {
       return defaultValue;
     }
@@ -501,31 +499,11 @@ export function createGmApi(script: ScriptRecord, cdp: CdpClient): Record<string
   };
 
   const GM_deleteValue = (key: string): void => {
-    storageDelete(key);
+    getIsolatedScriptStore(scriptId).delete(key);
   };
 
   const GM_listValues = (): string[] => {
-    const keys: string[] = [];
-    try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        for (let i = 0; i < window.localStorage.length; i++) {
-          const k = window.localStorage.key(i);
-          if (k && k.startsWith(prefix)) {
-            keys.push(k.slice(prefix.length));
-          }
-        }
-        return keys;
-      }
-    } catch {
-      // Fallback
-    }
-
-    for (const k of memoryStore.keys()) {
-      if (k.startsWith(prefix)) {
-        keys.push(k.slice(prefix.length));
-      }
-    }
-    return keys;
+    return Array.from(getIsolatedScriptStore(scriptId).keys());
   };
 
   const GM_addStyle = (css: string): HTMLStyleElement => {

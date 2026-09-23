@@ -34,14 +34,32 @@ export interface ContentScriptBridgeOptions {
   timeoutMs?: number;
   channelId?: string;
   requireChannelId?: boolean;
+  allowedOrigin?: string | string[];
+  requireOrigin?: boolean;
   autoStart?: boolean;
   tabId?: number;
+}
+
+function generateSecureChannelId(): string {
+  if (typeof crypto !== 'undefined') {
+    if (typeof crypto.randomUUID === 'function') {
+      return `xokj_${crypto.randomUUID()}`;
+    }
+    if (typeof crypto.getRandomValues === 'function') {
+      const bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      return `xokj_${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+    }
+  }
+  return `xokj_${Math.random().toString(36).slice(2, 12)}_${Date.now().toString(36)}`;
 }
 
 export class ContentScriptBridge {
   private readonly timeoutMs: number;
   private readonly channelId: string;
   private readonly requireChannelId: boolean;
+  private readonly allowedOrigin?: string | string[];
+  private readonly requireOrigin: boolean;
   private status: DebuggerSessionStatus = 'IDLE';
   private conflictReason?: string;
   private isListening = false;
@@ -56,10 +74,10 @@ export class ContentScriptBridge {
 
   constructor(options: ContentScriptBridgeOptions = {}) {
     this.timeoutMs = options.timeoutMs ?? 30000;
-    this.channelId =
-      options.channelId ??
-      `xokj_${typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2, 12)}`;
+    this.channelId = options.channelId ?? generateSecureChannelId();
     this.requireChannelId = options.requireChannelId ?? Boolean(options.channelId);
+    this.allowedOrigin = options.allowedOrigin;
+    this.requireOrigin = options.requireOrigin ?? false;
     this.tabId = options.tabId;
 
     if (options.autoStart) {
@@ -227,23 +245,68 @@ export class ContentScriptBridge {
   }
 
   /**
+   * Verifies that the message origin matches window.location.origin or configured allowedOrigin.
+   */
+  public verifyOrigin(origin?: string): boolean {
+    if (this.requireOrigin && !origin) {
+      return false;
+    }
+    if (this.allowedOrigin) {
+      if (origin === undefined) {
+        return !this.requireOrigin;
+      }
+      if (this.allowedOrigin === '*') {
+        return true;
+      }
+      if (Array.isArray(this.allowedOrigin)) {
+        return this.allowedOrigin.includes('*') || this.allowedOrigin.includes(origin);
+      }
+      return origin === this.allowedOrigin;
+    }
+    if (
+      typeof window !== 'undefined' &&
+      window.location &&
+      window.location.origin &&
+      window.location.origin !== 'null'
+    ) {
+      if (origin !== undefined && origin !== '' && origin !== window.location.origin) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
    * Handler for window.addEventListener('message') from userscripts in Main World.
    */
-  public async handleWindowMessage(event: MessageEvent | { source?: any; data?: any }): Promise<void> {
+  public async handleWindowMessage(
+    event: MessageEvent | { source?: any; data?: any; origin?: string }
+  ): Promise<void> {
     // Layer 1: Source verification - must be current window
     if (event.source !== window) return;
+
+    // Layer 2: Origin verification
+    if (!this.verifyOrigin(event.origin)) {
+      return;
+    }
 
     const data = event.data;
     if (!data || typeof data !== 'object') return;
 
-    // Filter foreign application messages
+    // Layer 3: Message type filtering
     if (data.type !== 'CDP_RPC_REQUEST') return;
 
-    // Layer 2: Origin & channel validation if specified
+    // Layer 4: Sender source verification
     if (data.source && data.source !== 'xokj-userscript') {
       return;
     }
-    if (this.requireChannelId && data.channelId !== this.channelId) {
+
+    // Layer 5: Channel token validation
+    if (this.requireChannelId) {
+      if (!data.channelId || typeof data.channelId !== 'string' || data.channelId !== this.channelId) {
+        return;
+      }
+    } else if (this.channelId && data.channelId && data.channelId !== this.channelId) {
       return;
     }
 

@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { setupChromeMock } from '../mocks/chrome';
 import { CdpBridgeServer } from '@/background/cdp-bridge';
 import { TabDebuggerManager } from '@/background/debugger-mgr';
-import type { CdpRpcRequest, CdpRpcResponse } from '@/shared/types';
+import type { CdpRpcRequest, CdpRpcResponse, ScriptRecord } from '@/shared/types';
+import { saveScript } from '@/shared/storage';
 
 describe('Feature 9 & 10: Asynchronous CDP RPC Bridge & Event Dispatcher', () => {
   let context: ReturnType<typeof setupChromeMock>;
@@ -434,6 +435,449 @@ describe('Feature 9 & 10: Asynchronous CDP RPC Bridge & Event Dispatcher', () =>
       expect(() => {
         context.mockDebugger._emitEvent({ tabId: 99 }, 'Network.dataReceived', {});
       }).not.toThrow();
+    });
+  });
+
+  describe('Tier 4: Background Userscript Permission Validation (M4 / Feature 16)', () => {
+    it('T4.1: allows CDP command for script with @grant GM_cdp on matching URL', async () => {
+      const script: ScriptRecord = {
+        id: 'script-cdp-all',
+        name: 'Full CDP Script',
+        code: '// code',
+        metadata: {
+          name: 'Full CDP Script',
+          matches: ['*://example.com/*'],
+          matchPatterns: ['*://example.com/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-end',
+          grants: ['GM_cdp'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await saveScript(script);
+
+      context.mockDebugger.sendCommand.mockResolvedValueOnce({ cookies: [] });
+
+      const res = await context.mockRuntime._emitMessage(
+        {
+          type: 'CDP_RPC_REQUEST',
+          id: 'perm-1',
+          scriptId: 'script-cdp-all',
+          method: 'Network.getCookies'
+        },
+        { tab: { id: 42, url: 'https://example.com/test' } }
+      );
+
+      expect(res.success).toBe(true);
+      expect(context.mockDebugger.sendCommand).toHaveBeenCalledWith(
+        expect.objectContaining({ tabId: 42 }),
+        'Network.getCookies',
+        expect.anything()
+      );
+    });
+
+    it('T4.2: allows command matching declared @cdp domain', async () => {
+      const script: ScriptRecord = {
+        id: 'script-net-only',
+        name: 'Network Only Script',
+        code: '// code',
+        metadata: {
+          name: 'Network Only Script',
+          matches: ['*://example.com/*'],
+          matchPatterns: ['*://example.com/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-end',
+          grants: [],
+          cdp: [],
+          cdpDeclarations: [{ domain: 'Network', method: 'enable', command: 'Network.enable', params: {} }],
+          cdpDomains: ['Network'],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await saveScript(script);
+
+      context.mockDebugger.sendCommand.mockResolvedValueOnce({ enabled: true });
+
+      const res = await context.mockRuntime._emitMessage(
+        {
+          type: 'CDP_RPC_REQUEST',
+          id: 'perm-2',
+          scriptId: 'script-net-only',
+          method: 'Network.enable'
+        },
+        { tab: { id: 42, url: 'https://example.com/test' } }
+      );
+
+      expect(res.success).toBe(true);
+      expect(context.mockDebugger.sendCommand).toHaveBeenCalledWith(
+        expect.objectContaining({ tabId: 42 }),
+        'Network.enable',
+        expect.anything()
+      );
+    });
+
+    it('T4.3: rejects command when method domain is not authorized for script', async () => {
+      const script: ScriptRecord = {
+        id: 'script-net-restricted',
+        name: 'Net Restricted Script',
+        code: '// code',
+        metadata: {
+          name: 'Net Restricted Script',
+          matches: ['*://example.com/*'],
+          matchPatterns: ['*://example.com/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-end',
+          grants: [],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: ['Network'],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await saveScript(script);
+
+      const res = await context.mockRuntime._emitMessage(
+        {
+          type: 'CDP_RPC_REQUEST',
+          id: 'perm-3',
+          scriptId: 'script-net-restricted',
+          method: 'Page.navigate',
+          params: { url: 'https://evil.com' }
+        },
+        { tab: { id: 42, url: 'https://example.com/test' } }
+      );
+
+      expect(res.success).toBe(false);
+      expect(res.error?.code).toBe(403);
+      expect(res.error?.data).toEqual(expect.objectContaining({ reason: 'DOMAIN_NOT_AUTHORIZED' }));
+      expect(context.mockDebugger.sendCommand).not.toHaveBeenCalled();
+    });
+
+    it('T4.4: rejects command when script declared @grant none', async () => {
+      const script: ScriptRecord = {
+        id: 'script-grant-none',
+        name: 'Grant None Script',
+        code: '// code',
+        metadata: {
+          name: 'Grant None Script',
+          matches: ['*://*/*'],
+          matchPatterns: ['*://*/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-end',
+          grants: ['none'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: ['Network'], // Conflicting directive ignored due to @grant none
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await saveScript(script);
+
+      const res = await context.mockRuntime._emitMessage(
+        {
+          type: 'CDP_RPC_REQUEST',
+          id: 'perm-4',
+          scriptId: 'script-grant-none',
+          method: 'Network.enable'
+        },
+        { tab: { id: 42, url: 'https://example.com/test' } }
+      );
+
+      expect(res.success).toBe(false);
+      expect(res.error?.code).toBe(403);
+      expect(res.error?.data).toEqual(expect.objectContaining({ reason: 'GRANT_NONE' }));
+      expect(context.mockDebugger.sendCommand).not.toHaveBeenCalled();
+    });
+
+    it('T4.5: rejects command when script has no CDP permissions declared', async () => {
+      const script: ScriptRecord = {
+        id: 'script-no-cdp',
+        name: 'No CDP Script',
+        code: '// code',
+        metadata: {
+          name: 'No CDP Script',
+          matches: ['*://*/*'],
+          matchPatterns: ['*://*/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-end',
+          grants: ['GM_setValue', 'GM_getValue'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await saveScript(script);
+
+      const res = await context.mockRuntime._emitMessage(
+        {
+          type: 'CDP_RPC_REQUEST',
+          id: 'perm-5',
+          scriptId: 'script-no-cdp',
+          method: 'Network.getCookies'
+        },
+        { tab: { id: 42, url: 'https://example.com/test' } }
+      );
+
+      expect(res.success).toBe(false);
+      expect(res.error?.code).toBe(403);
+      expect(res.error?.data).toEqual(expect.objectContaining({ reason: 'NO_CDP_PERMISSIONS' }));
+    });
+
+    it('T4.6: rejects command when scriptId is not found in registry', async () => {
+      const res = await context.mockRuntime._emitMessage(
+        {
+          type: 'CDP_RPC_REQUEST',
+          id: 'perm-6',
+          scriptId: 'ghost-script-404',
+          method: 'Network.enable'
+        },
+        { tab: { id: 42, url: 'https://example.com/test' } }
+      );
+
+      expect(res.success).toBe(false);
+      expect(res.error?.code).toBe(403);
+      expect(res.error?.data).toEqual(expect.objectContaining({ reason: 'SCRIPT_NOT_FOUND' }));
+    });
+
+    it('T4.7: rejects command when script is disabled', async () => {
+      const script: ScriptRecord = {
+        id: 'script-disabled-test',
+        name: 'Disabled Script',
+        code: '// code',
+        metadata: {
+          name: 'Disabled Script',
+          matches: ['*://*/*'],
+          matchPatterns: ['*://*/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-end',
+          grants: ['GM_cdp'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: false,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await saveScript(script);
+
+      const res = await context.mockRuntime._emitMessage(
+        {
+          type: 'CDP_RPC_REQUEST',
+          id: 'perm-7',
+          scriptId: 'script-disabled-test',
+          method: 'Network.enable'
+        },
+        { tab: { id: 42, url: 'https://example.com/test' } }
+      );
+
+      expect(res.success).toBe(false);
+      expect(res.error?.code).toBe(403);
+      expect(res.error?.data).toEqual(expect.objectContaining({ reason: 'SCRIPT_DISABLED' }));
+    });
+
+    it('T4.8: rejects command when tab URL does not match script match patterns', async () => {
+      const script: ScriptRecord = {
+        id: 'script-bank-only',
+        name: 'Bank Script',
+        code: '// code',
+        metadata: {
+          name: 'Bank Script',
+          matches: ['https://secure.bank.com/*'],
+          matchPatterns: ['https://secure.bank.com/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-end',
+          grants: ['GM_cdp'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await saveScript(script);
+
+      const res = await context.mockRuntime._emitMessage(
+        {
+          type: 'CDP_RPC_REQUEST',
+          id: 'perm-8',
+          scriptId: 'script-bank-only',
+          method: 'Network.getCookies'
+        },
+        { tab: { id: 42, url: 'https://evil.org/phishing' } }
+      );
+
+      expect(res.success).toBe(false);
+      expect(res.error?.code).toBe(403);
+      expect(res.error?.data).toEqual(expect.objectContaining({ reason: 'URL_NOT_MATCHED' }));
+    });
+
+    it('T4.9: rejects command when tab URL matches script exclusion pattern', async () => {
+      const script: ScriptRecord = {
+        id: 'script-exclude-test',
+        name: 'Exclude Script',
+        code: '// code',
+        metadata: {
+          name: 'Exclude Script',
+          matches: ['*://example.com/*'],
+          matchPatterns: ['*://example.com/*'],
+          includes: [],
+          excludes: ['*://example.com/admin/*'],
+          runAt: 'document-end',
+          grants: ['GM_cdp'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await saveScript(script);
+
+      const res = await context.mockRuntime._emitMessage(
+        {
+          type: 'CDP_RPC_REQUEST',
+          id: 'perm-9',
+          scriptId: 'script-exclude-test',
+          method: 'Network.getCookies'
+        },
+        { tab: { id: 42, url: 'https://example.com/admin/settings' } }
+      );
+
+      expect(res.success).toBe(false);
+      expect(res.error?.code).toBe(403);
+      expect(res.error?.data).toEqual(expect.objectContaining({ reason: 'URL_EXCLUDED' }));
+    });
+
+    it('T4.10: rejects untagged request when enforcePermissions is active', async () => {
+      server.setEnforcePermissions(true);
+
+      const res = await context.mockRuntime._emitMessage(
+        {
+          type: 'CDP_RPC_REQUEST',
+          id: 'perm-10',
+          method: 'Network.enable'
+        },
+        { tab: { id: 42, url: 'https://example.com/test' } }
+      );
+
+      expect(res.success).toBe(false);
+      expect(res.error?.code).toBe(403);
+      expect(res.error?.data).toEqual(expect.objectContaining({ reason: 'MISSING_SCRIPT_ID' }));
+
+      server.setEnforcePermissions(false);
+    });
+
+    it('T4.11: supports custom scriptResolver option', async () => {
+      const customScript: ScriptRecord = {
+        id: 'custom-resolved',
+        name: 'Custom Resolved Script',
+        code: '',
+        metadata: {
+          name: 'Custom Resolved',
+          matches: ['<all_urls>'],
+          matchPatterns: ['<all_urls>'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-end',
+          grants: ['cdp'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: 0,
+        updatedAt: 0
+      };
+
+      const customServer = new CdpBridgeServer({
+        autoAttach: false,
+        scriptResolver: async (id) => (id === 'custom-resolved' ? customScript : null)
+      });
+      customServer.init();
+
+      context.mockDebugger.sendCommand.mockResolvedValueOnce({ ok: true });
+
+      const res = await (customServer as any).processRpcRequest(
+        {
+          type: 'CDP_RPC_REQUEST',
+          id: 'perm-11',
+          scriptId: 'custom-resolved',
+          method: 'DOM.getDocument'
+        },
+        { tab: { id: 42, url: 'https://example.com/' } }
+      );
+
+      expect(res.success).toBe(true);
+      customServer.destroy();
     });
   });
 });
