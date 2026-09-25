@@ -1,6 +1,13 @@
 <template>
   <div class="popup-container">
-    <HeaderBar />
+    <HeaderBar
+      :url="tabInfo.url"
+      :hostname="tabInfo.hostname"
+      :fav-icon-url="tabInfo.favIconUrl"
+      :is-restricted="tabInfo.isRestricted"
+      :matching-count="matchingScripts.length"
+      @reload-tab="reloadTab"
+    />
 
     <GlobalControls
       :global-enabled="globalEnabled"
@@ -26,15 +33,6 @@
         <span>CDP debugger reconnected successfully!</span>
       </div>
     </Transition>
-
-    <TabContextBar
-      v-if="!tabInfo.isRestricted"
-      :url="tabInfo.url"
-      :hostname="tabInfo.hostname"
-      :fav-icon-url="tabInfo.favIconUrl"
-      :matching-count="matchingScripts.length"
-      @reload-tab="reloadTab"
-    />
 
     <main class="script-list-area">
       <div v-if="isLoading">
@@ -81,7 +79,6 @@ import { usePopupState } from './composables/usePopupState';
 import HeaderBar from './components/HeaderBar.vue';
 import GlobalControls from './components/GlobalControls.vue';
 import ConflictBanner from './components/ConflictBanner.vue';
-import TabContextBar from './components/TabContextBar.vue';
 import ScriptCard from './components/ScriptCard.vue';
 import EmptyState from './components/EmptyState.vue';
 
