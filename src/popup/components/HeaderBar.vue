@@ -6,23 +6,10 @@
       </div>
       <span class="title">XOKJ</span>
     </div>
-    <div class="actions">
-      <button
-        class="dashboard-btn"
-        title="Open Script Management Dashboard"
-        @click="$emit('openDashboard')"
-      >
-        <i class="fa-solid fa-gauge-high btn-icon"></i>
-        <span class="btn-text">Dashboard</span>
-      </button>
-    </div>
   </header>
 </template>
 
 <script setup lang="ts">
-defineEmits<{
-  (e: 'openDashboard'): void;
-}>();
 </script>
 
 <style scoped>
@@ -60,32 +47,5 @@ defineEmits<{
   font-weight: 700;
   color: #f8fafc;
   letter-spacing: 0.5px;
-}
-.dashboard-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #e2e8f0;
-  padding: 4px 8px;
-  border-radius: 5px;
-  font-size: 11px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.dashboard-btn:hover {
-  background: rgba(99, 102, 241, 0.18);
-  border-color: rgba(99, 102, 241, 0.5);
-  color: #ffffff;
-  transform: translateY(-1px);
-}
-.dashboard-btn:active {
-  transform: scale(0.97);
-}
-.btn-icon {
-  font-size: 10px;
-  color: #818cf8;
 }
 </style>

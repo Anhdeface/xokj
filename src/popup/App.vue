@@ -1,6 +1,6 @@
 <template>
   <div class="popup-container">
-    <HeaderBar @open-dashboard="openDashboard()" />
+    <HeaderBar />
 
     <GlobalControls
       :global-enabled="globalEnabled"
@@ -35,13 +35,6 @@
       :matching-count="matchingScripts.length"
       @reload-tab="reloadTab"
     />
-
-    <Transition name="banner-slide">
-      <div v-if="!globalEnabled" class="paused-banner">
-        <i class="fa-solid fa-circle-pause banner-pause-icon"></i>
-        <span>Script execution is globally paused</span>
-      </div>
-    </Transition>
 
     <main class="script-list-area">
       <div v-if="isLoading">
@@ -158,22 +151,6 @@ html, body {
 
 .scripts-scroll {
   padding: 6px 0 10px 0;
-}
-
-.paused-banner {
-  background: rgba(245, 158, 11, 0.1);
-  border-bottom: 1px solid rgba(245, 158, 11, 0.3);
-  color: #fbbf24;
-  font-size: 11px;
-  font-weight: 500;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 6px 12px;
-}
-.banner-pause-icon {
-  font-size: 11px;
 }
 
 .success-toast {

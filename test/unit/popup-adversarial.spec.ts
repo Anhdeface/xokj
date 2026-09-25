@@ -161,12 +161,12 @@ describe('Adversarial Stress Test: Popup UI & Background UI IPC', () => {
       const settings = await getSettings();
       expect(settings.globalEnabled).toBe(expectedGlobal);
 
-      const pausedBanner = wrapper.find('.paused-banner');
+      const labelStatus = wrapper.find('.global-controls .label-status');
       if (expectedGlobal) {
-        expect(pausedBanner.exists()).toBe(false);
+        expect(labelStatus.exists()).toBe(true);
+        expect(labelStatus.text()).toContain('Active');
       } else {
-        expect(pausedBanner.exists()).toBe(true);
-        expect(pausedBanner.text()).toContain('globally paused');
+        expect(labelStatus.exists()).toBe(false);
       }
     });
 

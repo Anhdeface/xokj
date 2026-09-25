@@ -159,8 +159,7 @@ describe('Feature 19-21: Popup UI Component Suite (test/unit/popup.spec.ts)', ()
 
       const stored = await context.localStorage.get('settings');
       expect(stored.settings?.globalEnabled).toBe(false);
-      expect(wrapper.find('.paused-banner').exists()).toBe(true);
-      expect(wrapper.find('.paused-banner').text()).toContain('Script execution is globally paused');
+      expect(wrapper.find('.global-controls .label-status').exists()).toBe(false);
     });
 
     it('T3.3: reactively updates when chrome.storage.onChanged fires externally', async () => {
@@ -179,7 +178,8 @@ describe('Feature 19-21: Popup UI Component Suite (test/unit/popup.spec.ts)', ()
       );
       await flushPromises();
 
-      expect(wrapper.find('.paused-banner').exists()).toBe(true);
+      expect((wrapper.find('.global-controls input[type="checkbox"]').element as HTMLInputElement).checked).toBe(false);
+      expect(wrapper.find('.global-controls .label-status').exists()).toBe(false);
     });
   });
 
@@ -336,14 +336,14 @@ describe('Feature 19-21: Popup UI Component Suite (test/unit/popup.spec.ts)', ()
   });
 
   describe('Tier 6: Dashboard Navigation & Tab Reloading', () => {
-    it('T6.1: clicking Dashboard button invokes chrome.runtime.openOptionsPage', async () => {
+    it('T6.1: clicking Manage all scripts button invokes chrome.runtime.openOptionsPage', async () => {
       const wrapper = mount(PopupApp);
       await flushPromises();
 
-      const dashboardBtn = wrapper.find('.dashboard-btn');
-      expect(dashboardBtn.exists()).toBe(true);
+      const footerLink = wrapper.find('.footer-link');
+      expect(footerLink.exists()).toBe(true);
 
-      await dashboardBtn.trigger('click');
+      await footerLink.trigger('click');
       await flushPromises();
 
       expect(context.mockRuntime.openOptionsPage).toHaveBeenCalled();

@@ -13,9 +13,9 @@
       </div>
       <div class="control-label">
         <span class="label-primary">Script Engine</span>
-        <span class="label-status" :class="{ 'status-off': !globalEnabled }">
+        <span v-if="globalEnabled" class="label-status">
           <i class="fa-solid fa-circle-dot status-icon"></i>
-          <span>{{ globalEnabled ? 'Active' : 'Paused' }}</span>
+          <span>Active</span>
         </span>
       </div>
     </div>
@@ -80,9 +80,6 @@ defineEmits<{
 }
 .status-icon {
   font-size: 6px;
-}
-.label-status.status-off {
-  color: #f87171;
 }
 
 .toggle-switch {
