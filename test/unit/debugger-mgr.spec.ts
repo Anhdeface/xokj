@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { setupChromeMock } from '../mocks/chrome';
-import { TabDebuggerManager } from '@/background/debugger-mgr';
-import { saveScript } from '@/shared/storage';
+import { TabDebuggerManager, scriptRequiresCdp } from '@/background/debugger-mgr';
+import { saveScript, saveSettings, deleteScript, toggleScript } from '@/shared/storage';
 import { DevToolsConflictError } from '@/shared/types';
-import type { ScriptRecord } from '@/shared/types';
+import type { ScriptRecord, CdpRpcLifecycleMessage } from '@/shared/types';
 
 describe('Feature 7 & 8: Chrome Debugger Session Manager & Declarative Init', () => {
   let context: ReturnType<typeof setupChromeMock>;
@@ -637,6 +637,436 @@ describe('Feature 7 & 8: Chrome Debugger Session Manager & Declarative Init', ()
         'Fetch.enable',
         { patterns: [{ urlPattern: '*' }] }
       );
+    });
+  });
+
+  describe('Tier 5: Milestone 1 Lifecycle & Conflict Robustness (R1, R2, R3)', () => {
+    it('T5.1: disabling globalEnabled via saveSettings automatically detaches all attached tabs to IDLE, clears active domains, and broadcasts lifecycle', async () => {
+      // 1. Attach tabs 10 and 20
+      await manager.attachTab(10);
+      await manager.attachTab(20);
+      expect(manager.getTabStatus(10)).toBe('ATTACHED');
+      expect(manager.getTabStatus(20)).toBe('ATTACHED');
+
+      // Add active domains
+      (manager as any).sessions.get(10)?.activeDomains.add('Network');
+      (manager as any).sessions.get(20)?.activeDomains.add('Page');
+      expect(manager.getActiveDomains(10)).toContain('Network');
+      expect(manager.getActiveDomains(20)).toContain('Page');
+
+      // Track lifecycle events
+      const events: CdpRpcLifecycleMessage[] = [];
+      manager.onLifecycle((evt) => events.push(evt));
+
+      // 2. Disable global engine
+      await saveSettings({ globalEnabled: false });
+
+      await vi.waitFor(() => {
+        expect(context.mockDebugger.detach).toHaveBeenCalledWith({ tabId: 10 });
+        expect(context.mockDebugger.detach).toHaveBeenCalledWith({ tabId: 20 });
+        expect(manager.getTabStatus(10)).toBe('IDLE');
+        expect(manager.getTabStatus(20)).toBe('IDLE');
+        expect(events.some((e) => e.tabId === 10)).toBe(true);
+        expect(events.some((e) => e.tabId === 20)).toBe(true);
+      });
+
+      // 3. Verify sessions reset to IDLE and state is cleanly cleared
+      expect(manager.getTabStatus(10)).toBe('IDLE');
+      expect(manager.getTabStatus(20)).toBe('IDLE');
+      expect(manager.isAttached(10)).toBe(false);
+      expect(manager.isAttached(20)).toBe(false);
+      expect(manager.getActiveDomains(10)).toEqual([]);
+      expect(manager.getActiveDomains(20)).toEqual([]);
+      expect(manager.getSession(10)?.conflictDetected).toBe(false);
+      expect(manager.getSession(20)?.conflictDetected).toBe(false);
+      expect(manager.getSession(10)?.conflictReason).toBeUndefined();
+      expect(manager.getSession(20)?.conflictReason).toBeUndefined();
+
+      // Verify lifecycle events broadcasted
+      const tab10Event = events.find((e) => e.tabId === 10);
+      const tab20Event = events.find((e) => e.tabId === 20);
+      expect(tab10Event?.status).toBe('DETACHED');
+      expect(tab20Event?.status).toBe('DETACHED');
+
+      // Verify storage reflects IDLE status
+      const stored = await context.localStorage.get('tab_sessions');
+      expect(stored.tab_sessions[10]?.status).toBe('IDLE');
+      expect(stored.tab_sessions[20]?.status).toBe('IDLE');
+    });
+
+    it('T5.2: detachAll cleanly detaches all active sessions and normalizes targetStatus to IDLE', async () => {
+      await manager.attachTab(101);
+      await manager.attachTab(102);
+
+      await manager.detachAll('IDLE');
+
+      expect(manager.getTabStatus(101)).toBe('IDLE');
+      expect(manager.getTabStatus(102)).toBe('IDLE');
+      expect(manager.isAttached(101)).toBe(false);
+      expect(manager.isAttached(102)).toBe(false);
+      expect(context.mockDebugger.detach).toHaveBeenCalledWith({ tabId: 101 });
+      expect(context.mockDebugger.detach).toHaveBeenCalledWith({ tabId: 102 });
+    });
+
+    it('T5.3: toggling off the only matching CDP script on a tab triggers clean detachment to IDLE', async () => {
+      // Clear default scripts
+      await context.localStorage.set({ scripts: {} });
+
+      const cdpScript: ScriptRecord = {
+        id: 'cdp-toggle-script',
+        name: 'CDP Toggle Script',
+        code: '// ==UserScript==\n// @match https://example.com/*\n// @grant GM_cdp\n// @cdp Network.enable\n// ==/UserScript==',
+        metadata: {
+          name: 'CDP Toggle Script',
+          matches: ['https://example.com/*'],
+          matchPatterns: ['https://example.com/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: ['GM_cdp'],
+          cdp: [{ domain: 'Network', method: 'enable', command: 'Network.enable', params: {} }],
+          cdpDeclarations: [{ domain: 'Network', method: 'enable', command: 'Network.enable', params: {} }],
+          cdpDomains: ['Network'],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await saveScript(cdpScript);
+
+      context.mockTabs.get.mockResolvedValue({ id: 42, url: 'https://example.com/test' } as any);
+      await manager.attachTab(42);
+      await manager.initializeDeclaredDomains(42, 'https://example.com/test');
+
+      expect(manager.getTabStatus(42)).toBe('ATTACHED');
+      expect(manager.getActiveDomains(42)).toContain('Network');
+
+      // Toggle script off
+      await toggleScript(cdpScript.id, false);
+      await manager.reconcileTabs();
+
+      expect(context.mockDebugger.detach).toHaveBeenCalledWith({ tabId: 42 });
+      expect(manager.getTabStatus(42)).toBe('IDLE');
+      expect(manager.getActiveDomains(42)).toEqual([]);
+      expect(manager.getSession(42)?.conflictDetected).toBe(false);
+
+      const stored = await context.localStorage.get('tab_sessions');
+      expect(stored.tab_sessions[42]?.status).toBe('IDLE');
+    });
+
+    it('T5.4: toggling the CDP script back on reconciles and re-attaches the debugger when matching', async () => {
+      await context.localStorage.set({ scripts: {} });
+
+      const cdpScript: ScriptRecord = {
+        id: 'cdp-toggle-script-2',
+        name: 'CDP Toggle Script 2',
+        code: '// ==UserScript==\n// @match https://example.com/*\n// @grant GM_cdp\n// @cdp Network.enable\n// ==/UserScript==',
+        metadata: {
+          name: 'CDP Toggle Script 2',
+          matches: ['https://example.com/*'],
+          matchPatterns: ['https://example.com/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: ['GM_cdp'],
+          cdp: [{ domain: 'Network', method: 'enable', command: 'Network.enable', params: {} }],
+          cdpDeclarations: [{ domain: 'Network', method: 'enable', command: 'Network.enable', params: {} }],
+          cdpDomains: ['Network'],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: false,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await saveScript(cdpScript);
+
+      context.mockTabs.get.mockResolvedValue({ id: 42, url: 'https://example.com/test' } as any);
+      // Register session in IDLE state on tab 42
+      manager.setTabStatus(42, 'IDLE');
+      (manager as any).sessions.get(42)!.targetUrl = 'https://example.com/test';
+
+      context.mockDebugger.attach.mockClear();
+      context.mockDebugger.sendCommand.mockClear();
+
+      // Enable the script
+      await toggleScript(cdpScript.id, true);
+      await manager.reconcileTabs();
+
+      expect(context.mockDebugger.attach).toHaveBeenCalledWith({ tabId: 42 }, '1.3');
+      expect(manager.getTabStatus(42)).toBe('ATTACHED');
+      expect(context.mockDebugger.sendCommand).toHaveBeenCalledWith(
+        { tabId: 42 },
+        'Network.enable',
+        {}
+      );
+      expect(manager.getActiveDomains(42)).toContain('Network');
+    });
+
+    it('T5.5: deleting the only CDP script triggers clean detachment to IDLE', async () => {
+      await context.localStorage.set({ scripts: {} });
+
+      const cdpScript: ScriptRecord = {
+        id: 'cdp-delete-script',
+        name: 'CDP Delete Script',
+        code: '// ==UserScript==\n// @match https://example.com/*\n// @grant GM_cdp\n// ==/UserScript==',
+        metadata: {
+          name: 'CDP Delete Script',
+          matches: ['https://example.com/*'],
+          matchPatterns: ['https://example.com/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: ['GM_cdp'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await saveScript(cdpScript);
+
+      context.mockTabs.get.mockResolvedValue({ id: 55, url: 'https://example.com/page' } as any);
+      await manager.attachTab(55);
+      expect(manager.getTabStatus(55)).toBe('ATTACHED');
+
+      // Delete the script
+      await deleteScript(cdpScript.id);
+      await manager.reconcileTabs();
+
+      expect(context.mockDebugger.detach).toHaveBeenCalledWith({ tabId: 55 });
+      expect(manager.getTabStatus(55)).toBe('IDLE');
+      expect(manager.getSession(55)?.conflictDetected).toBe(false);
+    });
+
+    it('T5.6: script without CDP requirements does not keep debugger attached', async () => {
+      await context.localStorage.set({ scripts: {} });
+
+      const nonCdpScript: ScriptRecord = {
+        id: 'no-cdp-script',
+        name: 'No CDP Script',
+        code: '// ==UserScript==\n// @match https://example.com/*\n// @grant none\n// ==/UserScript==',
+        metadata: {
+          name: 'No CDP Script',
+          matches: ['https://example.com/*'],
+          matchPatterns: ['https://example.com/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: ['none'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await saveScript(nonCdpScript);
+
+      context.mockTabs.get.mockResolvedValue({ id: 66, url: 'https://example.com/page' } as any);
+      await manager.attachTab(66);
+      expect(manager.getTabStatus(66)).toBe('ATTACHED');
+
+      await manager.reconcileTabs();
+
+      expect(context.mockDebugger.detach).toHaveBeenCalledWith({ tabId: 66 });
+      expect(manager.getTabStatus(66)).toBe('IDLE');
+    });
+
+    it('T5.7: canceled_by_user event while engine is disabled (globalEnabled: false) transitions tab to IDLE without CONFLICT', async () => {
+      await saveSettings({ globalEnabled: false });
+
+      // Create session on tab 70
+      await manager.attachTab(70).catch(() => {});
+      (manager as any).sessions.get(70)!.targetUrl = 'https://example.com';
+
+      // Native banner dismissed by user
+      context.mockDebugger._emitDetach({ tabId: 70 }, 'canceled_by_user');
+
+      expect(manager.getTabStatus(70)).toBe('IDLE');
+      expect(manager.getSession(70)?.conflictDetected).toBe(false);
+      expect(manager.getSession(70)?.conflictReason).toBeUndefined();
+    });
+
+    it('T5.8: programmatic detachTab followed by canceled_by_user event does not falsely set CONFLICT', async () => {
+      await saveSettings({ globalEnabled: true });
+      context.mockTabs.get.mockResolvedValue({ id: 80, url: 'https://example.com' } as any);
+      await manager.attachTab(80);
+      expect(manager.getTabStatus(80)).toBe('ATTACHED');
+
+      // Programmatic clean detach
+      await manager.detachTab(80, 'IDLE');
+      expect(manager.getTabStatus(80)).toBe('IDLE');
+
+      // Subsequent browser detach event arrives
+      context.mockDebugger._emitDetach({ tabId: 80 }, 'canceled_by_user');
+
+      expect(manager.getTabStatus(80)).toBe('IDLE');
+      expect(manager.getSession(80)?.conflictDetected).toBe(false);
+      expect(manager.getSession(80)?.conflictReason).toBeUndefined();
+    });
+
+    it('T5.9: canceled_by_user event on tab with NO matching CDP scripts transitions to IDLE without CONFLICT', async () => {
+      await saveSettings({ globalEnabled: true });
+      await context.localStorage.set({ scripts: {} });
+
+      context.mockTabs.get.mockResolvedValue({ id: 90, url: 'https://other-domain.org' } as any);
+      await manager.attachTab(90);
+
+      // Tab has no matching CDP scripts
+      context.mockDebugger._emitDetach({ tabId: 90 }, 'canceled_by_user');
+
+      expect(manager.getTabStatus(90)).toBe('IDLE');
+      expect(manager.getSession(90)?.conflictDetected).toBe(false);
+      expect(manager.getSession(90)?.conflictReason).toBeUndefined();
+    });
+
+    it('T5.10: replaced_with_devtools or unexpected canceled_by_user on tab with active CDP script still transitions to CONFLICT', async () => {
+      await saveSettings({ globalEnabled: true });
+
+      const cdpScript: ScriptRecord = {
+        id: 'active-cdp-script',
+        name: 'Active CDP Script',
+        code: '// ==UserScript==\n// @match https://example.com/*\n// @grant GM_cdp\n// ==/UserScript==',
+        metadata: {
+          name: 'Active CDP Script',
+          matches: ['https://example.com/*'],
+          matchPatterns: ['https://example.com/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: ['GM_cdp'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      await saveScript(cdpScript);
+
+      context.mockTabs.get.mockResolvedValue({ id: 42, url: 'https://example.com/app' } as any);
+      await manager.attachTab(42);
+      expect(manager.getTabStatus(42)).toBe('ATTACHED');
+
+      // Native DevTools opened
+      context.mockDebugger._emitDetach({ tabId: 42 }, 'replaced_with_devtools');
+
+      expect(manager.getTabStatus(42)).toBe('CONFLICT');
+      expect(manager.getSession(42)?.conflictDetected).toBe(true);
+      expect(manager.getSession(42)?.conflictReason).toBe('replaced_with_devtools');
+    });
+
+    it('T5.11: scriptRequiresCdp helper accurately identifies CDP requirements', () => {
+      const baseScript: ScriptRecord = {
+        id: 'test',
+        name: 'Test',
+        code: '',
+        metadata: {
+          name: 'Test',
+          matches: [],
+          matchPatterns: [],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: [],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: 0,
+        updatedAt: 0
+      };
+
+      // Disabled script
+      expect(scriptRequiresCdp({ ...baseScript, enabled: false })).toBe(false);
+
+      // Script with @grant none
+      expect(
+        scriptRequiresCdp({
+          ...baseScript,
+          metadata: { ...baseScript.metadata, grants: ['none'], cdpDomains: ['Network'] }
+        })
+      ).toBe(false);
+
+      // Script with GM_cdp grant
+      expect(
+        scriptRequiresCdp({
+          ...baseScript,
+          metadata: { ...baseScript.metadata, grants: ['GM_cdp'] }
+        })
+      ).toBe(true);
+
+      // Script with cdp grant
+      expect(
+        scriptRequiresCdp({
+          ...baseScript,
+          metadata: { ...baseScript.metadata, grants: ['cdp'] }
+        })
+      ).toBe(true);
+
+      // Script with * grant
+      expect(
+        scriptRequiresCdp({
+          ...baseScript,
+          metadata: { ...baseScript.metadata, grants: ['*'] }
+        })
+      ).toBe(true);
+
+      // Script with @cdp declarations
+      expect(
+        scriptRequiresCdp({
+          ...baseScript,
+          metadata: {
+            ...baseScript.metadata,
+            cdpDeclarations: [{ domain: 'Network', method: 'enable', command: 'Network.enable', params: {} }]
+          }
+        })
+      ).toBe(true);
+
+      // Script with cdpDomains
+      expect(
+        scriptRequiresCdp({
+          ...baseScript,
+          metadata: { ...baseScript.metadata, cdpDomains: ['Page'] }
+        })
+      ).toBe(true);
+
+      // Script without any CDP indicators
+      expect(scriptRequiresCdp(baseScript)).toBe(false);
     });
   });
 });

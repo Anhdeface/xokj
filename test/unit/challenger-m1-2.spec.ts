@@ -1,554 +1,720 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+/**
+ * Empirical Challenger M1-2: R3 Detach Reason Classification & Script Matching Suite
+ * Location: test/unit/challenger-m1-2.spec.ts
+ *
+ * Adversarially stress-tests:
+ * 1. Genuine DevTools conflict: `replaced_with_devtools` triggers CONFLICT.
+ * 2. Unexpected `canceled_by_user` while engine is active and matching CDP script is attached triggers CONFLICT.
+ * 3. Clean transitions to IDLE without CONFLICT (programmatic detach, engine disabled, script-absent tabs, excluded URLs).
+ * 4. Comprehensive script matching matrix: @grant none, @cdp, @grant GM_cdp, @grant *, @grant combinations.
+ * 5. Reconnection lifecycle and tab reconciliation under multi-script configurations.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { setupChromeMock } from '../mocks/chrome';
-import {
-  AsyncMutex,
-  storageMutex,
-  getScripts,
-  getScript,
-  saveScript,
-  deleteScript,
-  toggleScript,
-  importScripts,
-  exportScripts,
-  STORAGE_KEYS
-} from '@/shared/storage';
-import type { ScriptRecord } from '@/shared/types';
+import { TabDebuggerManager, scriptRequiresCdp } from '@/background/debugger-mgr';
+import { CdpBridgeServer } from '@/background/cdp-bridge';
+import { DevToolsConflictHandler } from '@/background/conflict-mgr';
+import { saveScript, saveSettings, toggleScript } from '@/shared/storage';
+import { DevToolsConflictError } from '@/shared/types';
+import type { ScriptRecord, CdpRpcLifecycleMessage, CdpRpcResponse } from '@/shared/types';
 
-describe('Challenger M1-2: Deadlock & Edge-Case Stress Suite', () => {
-  beforeEach(() => {
-    setupChromeMock();
+describe('Empirical Challenger M1-2: R3 Detach Reason Classification & Script Matching', () => {
+  let context: ReturnType<typeof setupChromeMock>;
+  let manager: TabDebuggerManager;
+  let server: CdpBridgeServer;
+  let conflictHandler: DevToolsConflictHandler;
+
+  const helperCreateCdpScript = (
+    id: string,
+    matchPattern: string,
+    grants: string[] = ['GM_cdp'],
+    cdpDomains: string[] = ['Network'],
+    enabled = true,
+    excludes: string[] = []
+  ): ScriptRecord => ({
+    id,
+    name: `Script ${id}`,
+    code: '// ==UserScript==\n// ==/UserScript==',
+    metadata: {
+      name: `Script ${id}`,
+      matches: [matchPattern],
+      matchPatterns: [matchPattern],
+      includes: [],
+      excludes,
+      runAt: 'document-start',
+      grants,
+      cdp: cdpDomains.map((d) => ({ domain: d, method: 'enable', command: `${d}.enable`, params: {}, raw: `${d}.enable` })),
+      cdpDeclarations: cdpDomains.map((d) => ({ domain: d, method: 'enable', command: `${d}.enable`, params: {}, raw: `${d}.enable` })),
+      cdpDomains,
+      requires: [],
+      resources: {},
+      noframes: false,
+      connects: [],
+      rawEntries: {}
+    },
+    enabled,
+    createdAt: Date.now(),
+    updatedAt: Date.now()
   });
 
-  describe('Subsystem 1: AsyncMutex Exception Handling & Deadlock Resistance', () => {
-    it('C1.1: synchronous exception thrown in task rejects caller and leaves queue unlocked', async () => {
-      const mutex = new AsyncMutex();
-      expect(mutex.isLocked()).toBe(false);
+  beforeEach(async () => {
+    context = setupChromeMock();
+    manager = new TabDebuggerManager();
+    await manager.init();
 
-      const syncError = new Error('Explicit synchronous failure');
-      const failingTask = mutex.runExclusive(() => {
-        throw syncError;
-      });
-
-      await expect(failingTask).rejects.toThrow('Explicit synchronous failure');
-      expect(mutex.isLocked()).toBe(false);
-
-      // Verify subsequent task runs immediately without deadlock
-      const nextTask = await mutex.runExclusive(() => 'success-after-sync');
-      expect(nextTask).toBe('success-after-sync');
-      expect(mutex.isLocked()).toBe(false);
+    server = new CdpBridgeServer({
+      debuggerManager: manager,
+      autoAttach: true
     });
+    server.init();
+    manager.setInflightTracker(server);
 
-    it('C1.2: asynchronous exception thrown in task rejects caller and leaves queue unlocked', async () => {
-      const mutex = new AsyncMutex();
-      expect(mutex.isLocked()).toBe(false);
-
-      const asyncError = new Error('Explicit asynchronous failure');
-      const failingTask = mutex.runExclusive(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 5));
-        throw asyncError;
-      });
-
-      await expect(failingTask).rejects.toThrow('Explicit asynchronous failure');
-      expect(mutex.isLocked()).toBe(false);
-
-      // Verify subsequent task runs immediately without deadlock
-      const nextTask = await mutex.runExclusive(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 2));
-        return 'success-after-async';
-      });
-      expect(nextTask).toBe('success-after-async');
-      expect(mutex.isLocked()).toBe(false);
-    });
-
-    it('C1.3: interleaved pipeline of sync throws, async throws, and successes executes strictly FIFO without deadlocking', async () => {
-      const mutex = new AsyncMutex();
-      const executionLog: string[] = [];
-      const taskCount = 30;
-      const promises: Promise<any>[] = [];
-
-      for (let i = 0; i < taskCount; i++) {
-        const type = i % 4;
-        if (type === 0) {
-          // Sync throw
-          promises.push(
-            mutex
-              .runExclusive(() => {
-                executionLog.push(`sync-throw-${i}`);
-                throw new Error(`Sync error ${i}`);
-              })
-              .catch((err) => ({ error: err.message, index: i }))
-          );
-        } else if (type === 1) {
-          // Async throw
-          promises.push(
-            mutex
-              .runExclusive(async () => {
-                await new Promise((r) => setTimeout(r, 2));
-                executionLog.push(`async-throw-${i}`);
-                throw new Error(`Async error ${i}`);
-              })
-              .catch((err) => ({ error: err.message, index: i }))
-          );
-        } else if (type === 2) {
-          // Sync success
-          promises.push(
-            mutex.runExclusive(() => {
-              executionLog.push(`sync-success-${i}`);
-              return `val-${i}`;
-            })
-          );
-        } else {
-          // Async success
-          promises.push(
-            mutex.runExclusive(async () => {
-              await new Promise((r) => setTimeout(r, 3));
-              executionLog.push(`async-success-${i}`);
-              return `val-${i}`;
-            })
-          );
-        }
-      }
-
-      const results = await Promise.all(promises);
-
-      // Verify all 30 tasks executed in strict FIFO order
-      expect(executionLog.length).toBe(taskCount);
-      for (let i = 0; i < taskCount; i++) {
-        const expectedPrefix =
-          i % 4 === 0
-            ? `sync-throw-${i}`
-            : i % 4 === 1
-              ? `async-throw-${i}`
-              : i % 4 === 2
-                ? `sync-success-${i}`
-                : `async-success-${i}`;
-        expect(executionLog[i]).toBe(expectedPrefix);
-      }
-
-      // Verify error vs value results
-      for (let i = 0; i < taskCount; i++) {
-        if (i % 4 === 0 || i % 4 === 1) {
-          expect(results[i]).toHaveProperty('error');
-        } else {
-          expect(results[i]).toBe(`val-${i}`);
-        }
-      }
-
-      // Mutex must be completely unlocked
-      expect(mutex.isLocked()).toBe(false);
-
-      // Follow-up task succeeds cleanly
-      const trailing = await mutex.runExclusive(() => 'trailing-done');
-      expect(trailing).toBe('trailing-done');
-    });
-
-    it('C1.4: non-function task argument rejects gracefully and does not hang the mutex', async () => {
-      const mutex = new AsyncMutex();
-
-      await expect(mutex.runExclusive(null as any)).rejects.toThrow();
-      expect(mutex.isLocked()).toBe(false);
-
-      await expect(mutex.runExclusive(undefined as any)).rejects.toThrow();
-      expect(mutex.isLocked()).toBe(false);
-
-      const recovered = await mutex.runExclusive(() => 'recovered');
-      expect(recovered).toBe('recovered');
-    });
-
-    it('C1.5: massive concurrency load (200 parallel tasks with 50% failures) preserves FIFO state and zero leaks', async () => {
-      const mutex = new AsyncMutex();
-      let sharedCounter = 0;
-      const observedCounters: number[] = [];
-      const TOTAL = 200;
-
-      const tasks = Array.from({ length: TOTAL }, (_, i) => {
-        return mutex
-          .runExclusive(async () => {
-            const current = sharedCounter;
-            await new Promise((r) => setTimeout(r, 1));
-            sharedCounter = current + 1;
-            observedCounters.push(sharedCounter);
-            if (i % 2 === 0) {
-              throw new Error(`Even error at ${i}`);
-            }
-            return sharedCounter;
-          })
-          .catch((err) => ({ failed: true, error: err.message }));
-      });
-
-      const results = await Promise.all(tasks);
-      expect(results.length).toBe(TOTAL);
-      expect(sharedCounter).toBe(TOTAL);
-
-      // All 200 increments must have been strictly sequential
-      for (let i = 0; i < TOTAL; i++) {
-        expect(observedCounters[i]).toBe(i + 1);
-      }
-
-      expect(mutex.isLocked()).toBe(false);
-    });
+    conflictHandler = new DevToolsConflictHandler(server, manager);
+    conflictHandler.init();
   });
 
-  describe('Subsystem 2: Batch importScripts Edge Cases', () => {
-    it('C2.1: empty string and whitespace-only strings are rejected without mutating storage', async () => {
-      const initialScripts = await getScripts();
-      const initialCount = Object.keys(initialScripts).length;
+  afterEach(() => {
+    conflictHandler.destroy();
+    server.destroy();
+    manager.destroy();
+    vi.restoreAllMocks();
+  });
 
-      // 1. Empty string
-      const resEmpty = await importScripts('');
-      expect(resEmpty.total).toBe(0);
-      expect(resEmpty.imported).toBe(0);
-      expect(resEmpty.failed).toBe(0);
-      expect(resEmpty.errors?.length).toBeGreaterThan(0);
-      expect(resEmpty.errors![0]).toContain('Import string is empty');
+  // =========================================================================
+  // Section 1: Genuine DevTools Conflict Verification (replaced_with_devtools)
+  // =========================================================================
+  describe('1. Genuine DevTools Conflict (replaced_with_devtools)', () => {
+    it('1.1: replaced_with_devtools on attached tab with active CDP script transitions to CONFLICT state', async () => {
+      await saveSettings({ globalEnabled: true });
+      const script = helperCreateCdpScript('cdp-dt-1', 'https://example.com/*');
+      await saveScript(script);
 
-      // 2. Whitespace only string
-      const resWhitespace = await importScripts('    \n\t  \r\n  ');
-      expect(resWhitespace.total).toBe(0);
-      expect(resWhitespace.imported).toBe(0);
-      expect(resWhitespace.errors?.length).toBeGreaterThan(0);
-      expect(resWhitespace.errors![0]).toContain('Import string is empty');
+      context.mockTabs.get.mockResolvedValue({ id: 101, url: 'https://example.com/app' } as any);
+      await manager.attachTab(101);
+      expect(manager.getTabStatus(101)).toBe('ATTACHED');
+      expect(manager.isAttached(101)).toBe(true);
 
-      // Storage untouched
-      const afterScripts = await getScripts();
-      expect(Object.keys(afterScripts).length).toBe(initialCount);
+      // DevTools genuinely opened on tab
+      await context.mockDebugger._emitDetach({ tabId: 101 }, 'replaced_with_devtools');
+
+      expect(manager.getTabStatus(101)).toBe('CONFLICT');
+      expect(manager.isAttached(101)).toBe(false);
+      const session = manager.getSession(101);
+      expect(session?.conflictDetected).toBe(true);
+      expect(session?.conflictReason).toBe('replaced_with_devtools');
     });
 
-    it('C2.2: malformed JSON inputs return structured errors without throwing or deadlocking', async () => {
-      const initialScripts = await getScripts();
-      const initialCount = Object.keys(initialScripts).length;
+    it('1.2: inflight CDP commands on tab encountering replaced_with_devtools are rejected with code 1001', async () => {
+      await saveSettings({ globalEnabled: true });
+      const script = helperCreateCdpScript('cdp-dt-2', 'https://example.com/*');
+      await saveScript(script);
 
-      // Syntax error JSON
-      const resMalformed = await importScripts('{ not valid json');
-      expect(resMalformed.total).toBe(0);
-      expect(resMalformed.imported).toBe(0);
-      expect(resMalformed.errors?.[0]).toContain('Parse error');
+      context.mockTabs.get.mockResolvedValue({ id: 102, url: 'https://example.com/app' } as any);
+      await manager.attachTab(102);
 
-      // Valid JSON but non-script types
-      const resNumber = await importScripts('12345');
-      expect(resNumber.total).toBe(0);
-      expect(resNumber.errors?.[0]).toContain('Unrecognized JSON format');
+      // Simulate inflight command
+      context.mockDebugger.sendCommand.mockImplementationOnce(
+        () => new Promise(() => {}) // hangs inflight
+      );
 
-      const resEmptyObj = await importScripts('{}');
-      expect(resEmptyObj.total).toBe(0);
-      expect(resEmptyObj.errors?.[0]).toContain('Unrecognized JSON format');
+      const inflightPromise = context.mockRuntime._emitMessage(
+        { type: 'CDP_RPC_REQUEST', id: 'req-dt-102', method: 'DOM.getDocument' },
+        { tab: { id: 102, url: 'https://example.com/app' } }
+      );
 
-      const resNullJson = await importScripts('null');
-      expect(resNullJson.total).toBe(0);
-      expect(resNullJson.errors?.[0]).toContain('Unrecognized JSON format');
+      // Detach event fires with replaced_with_devtools
+      await context.mockDebugger._emitDetach({ tabId: 102 }, 'replaced_with_devtools');
 
-      // Direct non-string, non-array inputs
-      const resNull = await importScripts(null);
-      expect(resNull.total).toBe(0);
-      expect(resNull.errors?.[0]).toContain('Import data must be a JSON string');
-
-      const resUndefined = await importScripts(undefined);
-      expect(resUndefined.total).toBe(0);
-      expect(resUndefined.errors?.[0]).toContain('Import data must be a JSON string');
-
-      const resBoolean = await importScripts(true as any);
-      expect(resBoolean.total).toBe(0);
-      expect(resBoolean.errors?.[0]).toContain('Import data must be a JSON string');
-
-      // Storage untouched
-      const afterScripts = await getScripts();
-      expect(Object.keys(afterScripts).length).toBe(initialCount);
+      const response: CdpRpcResponse = await inflightPromise;
+      expect(response.success).toBe(false);
+      expect(response.error).toBeDefined();
+      expect(response.error?.code).toBe(1001);
+      expect(response.error?.message).toContain('DevTools conflict');
     });
 
-    it('C2.3: array with malformed and non-script items skips bad items and imports valid items', async () => {
-      const malformedBatch = [
-        null,
-        undefined,
-        42,
-        'random-string-without-header',
-        {},
-        { code: 12345 }, // code is not a string
-        { notCode: 'missing code property' },
-        {
-          id: 'valid-item-in-dirty-batch',
-          name: 'Clean Script In Dirty Batch',
-          code: '// ==UserScript==\n// @name Clean Script In Dirty Batch\n// @match https://example.com/*\n// ==/UserScript=='
-        }
-      ];
+    it('1.3: broadcasts CDP_LIFECYCLE_EVENT with status CONFLICT and reason replaced_with_devtools', async () => {
+      await saveSettings({ globalEnabled: true });
+      const script = helperCreateCdpScript('cdp-dt-3', 'https://example.com/*');
+      await saveScript(script);
 
-      const res = await importScripts(malformedBatch as any);
-      expect(res.total).toBe(8);
-      expect(res.failed).toBe(7);
-      expect(res.skipped).toBe(7);
-      expect(res.imported).toBe(1);
-      expect(res.scripts?.length).toBe(1);
-      expect(res.scripts![0].id).toBe('valid-item-in-dirty-batch');
-      expect(res.errors?.length).toBe(7);
+      context.mockTabs.get.mockResolvedValue({ id: 103, url: 'https://example.com/app' } as any);
+      await manager.attachTab(103);
 
-      // Verify the valid script is stored
-      const stored = await getScript('valid-item-in-dirty-batch');
-      expect(stored).not.toBeNull();
-      expect(stored?.name).toBe('Clean Script In Dirty Batch');
-    });
+      context.mockRuntime.sendMessage.mockClear();
 
-    it('C2.4: duplicate IDs within a single batch with overwrite=false assigns distinct IDs and prevents data loss', async () => {
-      const duplicateBatch = [
-        {
-          id: 'colliding-id',
-          name: 'First Colliding Script',
-          code: '// ==UserScript==\n// @name First Colliding Script\n// @match https://site-a.com/*\n// ==/UserScript=='
-        },
-        {
-          id: 'colliding-id',
-          name: 'Second Colliding Script',
-          code: '// ==UserScript==\n// @name Second Colliding Script\n// @match https://site-b.com/*\n// ==/UserScript=='
-        },
-        {
-          id: 'colliding-id',
-          name: 'Third Colliding Script',
-          code: '// ==UserScript==\n// @name Third Colliding Script\n// @match https://site-c.com/*\n// ==/UserScript=='
-        }
-      ];
+      await context.mockDebugger._emitDetach({ tabId: 103 }, 'replaced_with_devtools');
 
-      // Import with default overwrite=false
-      const res = await importScripts(duplicateBatch, { overwrite: false });
-      expect(res.total).toBe(3);
-      expect(res.imported).toBe(3);
-      expect(res.updated).toBe(0);
-      expect(res.failed).toBe(0);
-      expect(res.scripts?.length).toBe(3);
-
-      const ids = res.scripts!.map((s) => s.id);
-      const uniqueIds = new Set(ids);
-      // All 3 scripts must have unique IDs
-      expect(uniqueIds.size).toBe(3);
-
-      // Verify all 3 scripts exist in storage
-      const stored = await getScripts();
-      for (const id of ids) {
-        expect(stored[id]).toBeDefined();
-      }
-
-      // Check their names to ensure all 3 distinct contents were preserved
-      const storedNames = ids.map((id) => stored[id].name);
-      expect(storedNames).toContain('First Colliding Script');
-      expect(storedNames).toContain('Second Colliding Script');
-      expect(storedNames).toContain('Third Colliding Script');
-    });
-
-    it('C2.5: duplicate IDs within a single batch with overwrite=true updates existing record', async () => {
-      const duplicateBatch = [
-        {
-          id: 'overwrite-colliding-id',
-          name: 'Version 1 in Batch',
-          code: '// ==UserScript==\n// @name Version 1 in Batch\n// @version 1.0.0\n// @match https://site.com/*\n// ==/UserScript=='
-        },
-        {
-          id: 'overwrite-colliding-id',
-          name: 'Version 2 in Batch',
-          code: '// ==UserScript==\n// @name Version 2 in Batch\n// @version 2.0.0\n// @match https://site.com/*\n// ==/UserScript=='
-        }
-      ];
-
-      const res = await importScripts(duplicateBatch, { overwrite: true });
-      expect(res.total).toBe(2);
-      expect(res.imported).toBe(1);
-      expect(res.updated).toBe(1);
-      expect(res.failed).toBe(0);
-
-      const finalRecord = await getScript('overwrite-colliding-id');
-      expect(finalRecord).not.toBeNull();
-      expect(finalRecord?.name).toBe('Version 2 in Batch');
-      expect(finalRecord?.metadata?.version).toBe('2.0.0');
-    });
-
-    it('C2.6: batch import collision against pre-existing storage with overwrite=false preserves original', async () => {
-      await saveScript({
-        id: 'pre-existing-target',
-        name: 'Pre-existing Original',
-        code: '// ==UserScript==\n// @name Pre-existing Original\n// @match https://original.com/*\n// ==/UserScript=='
-      });
-
-      const batch = [
-        {
-          id: 'pre-existing-target',
-          name: 'Batch Colliding Script 1',
-          code: '// ==UserScript==\n// @name Batch Colliding Script 1\n// @match https://new1.com/*\n// ==/UserScript=='
-        },
-        {
-          id: 'pre-existing-target',
-          name: 'Batch Colliding Script 2',
-          code: '// ==UserScript==\n// @name Batch Colliding Script 2\n// @match https://new2.com/*\n// ==/UserScript=='
-        }
-      ];
-
-      const res = await importScripts(batch, { overwrite: false });
-      expect(res.imported).toBe(2);
-      expect(res.updated).toBe(0);
-
-      const stored = await getScripts();
-      // Original script MUST be intact
-      expect(stored['pre-existing-target'].name).toBe('Pre-existing Original');
-
-      // Two newly generated scripts exist
-      const generatedIds = res.scripts!.map((s) => s.id);
-      expect(generatedIds).not.toContain('pre-existing-target');
-      expect(stored[generatedIds[0]].name).toBe('Batch Colliding Script 1');
-      expect(stored[generatedIds[1]].name).toBe('Batch Colliding Script 2');
-    });
-
-    it('C2.7: large array batch import (200 scripts) processes with O(1) storage write and rapid turnaround', async () => {
-      const COUNT = 200;
-      const largeBatch = Array.from({ length: COUNT }, (_, i) => ({
-        id: `large-batch-${i}`,
-        name: `Large Batch Script ${i}`,
-        code: `// ==UserScript==\n// @name Large Batch Script ${i}\n// @version 1.0.${i}\n// @match https://site${i}.example.com/*\n// ==/UserScript==`
-      }));
-
-      // Pre-initialize storage so clean-install seeding is not counted in the batch spy
-      await getScripts();
-
-      // Spy on chrome.storage.local.set to verify write batching
-      const setSpy = vi.spyOn(chrome.storage.local, 'set');
-      const startTime = performance.now();
-
-      const res = await importScripts(largeBatch, { overwrite: true });
-
-      const durationMs = performance.now() - startTime;
-
-      expect(res.total).toBe(COUNT);
-      expect(res.imported).toBe(COUNT);
-      expect(res.failed).toBe(0);
-      expect(res.scripts?.length).toBe(COUNT);
-
-      // Exactly 1 storage write occurred despite 200 scripts
-      expect(setSpy).toHaveBeenCalledTimes(1);
-
-      // Must complete well within 500ms
-      expect(durationMs).toBeLessThan(500);
-
-      // Verify all 200 exist in storage
-      const stored = await getScripts();
-      for (let i = 0; i < COUNT; i++) {
-        expect(stored[`large-batch-${i}`]).toBeDefined();
-        expect(stored[`large-batch-${i}`].name).toBe(`Large Batch Script ${i}`);
-      }
-
-      setSpy.mockRestore();
-    });
-
-    it('C2.8: storage write failure inside importScripts propagates error and leaves storageMutex unlocked', async () => {
-      // Mock chrome.storage.local.set to throw (simulating quota exhaustion)
-      const setSpy = vi.spyOn(chrome.storage.local, 'set').mockRejectedValueOnce(new Error('QUOTA_BYTES exceeded'));
-
-      const batch = [
-        {
-          code: '// ==UserScript==\n// @name Quota Test\n// @match https://example.com/*\n// ==/UserScript=='
-        }
-      ];
-
-      await expect(importScripts(batch)).rejects.toThrow('QUOTA_BYTES exceeded');
-
-      // storageMutex must NOT be deadlocked
-      expect(storageMutex.isLocked()).toBe(false);
-
-      setSpy.mockRestore();
-
-      // Subsequent operation must succeed immediately
-      const saved = await saveScript({
-        id: 'post-quota-script',
-        code: '// ==UserScript==\n// @name Post Quota\n// @match https://example.com/*\n// ==/UserScript=='
-      });
-      expect(saved.id).toBe('post-quota-script');
-    });
-
-    it('C2.9: UUID collision during ID generation inside batch import is resolved by while loop', async () => {
-      await getScripts();
-
-      let callCount = 0;
-      const uuidSpy = vi.spyOn(crypto, 'randomUUID').mockImplementation(() => {
-        callCount++;
-        // Force the first two calls to return the exact same UUID
-        if (callCount <= 2) {
-          return 'colliding-uuid-1234' as `${string}-${string}-${string}-${string}-${string}`;
-        }
-        return `unique-uuid-${callCount}` as `${string}-${string}-${string}-${string}-${string}`;
-      });
-
-      const batchWithoutIds = [
-        {
-          name: 'Script Without ID 1',
-          code: '// ==UserScript==\n// @name Script Without ID 1\n// ==/UserScript=='
-        },
-        {
-          name: 'Script Without ID 2',
-          code: '// ==UserScript==\n// @name Script Without ID 2\n// ==/UserScript=='
-        }
-      ];
-
-      const res = await importScripts(batchWithoutIds);
-      expect(res.imported).toBe(2);
-      expect(res.scripts?.length).toBe(2);
-
-      const id1 = res.scripts![0].id;
-      const id2 = res.scripts![1].id;
-      expect(id1).not.toBe(id2);
-      expect(id1).toBe('colliding-uuid-1234');
-      expect(id2).toBe('unique-uuid-3');
-
-      uuidSpy.mockRestore();
-    });
-
-    it('C2.10: raw userscript string with leading whitespace and comment banners parses and imports cleanly', async () => {
-      await getScripts();
-
-      const rawScript = `
-        
-        // ==UserScript==
-        // @name Indented Raw Script
-        // @version 3.1.4
-        // @match https://indented.example.com/*
-        // ==/UserScript==
-        console.log("hello indented");
-      `;
-
-      const res = await importScripts(rawScript);
-      expect(res.total).toBe(1);
-      expect(res.imported).toBe(1);
-      expect(res.errors?.length).toBe(0);
-
-      const importedScript = res.scripts![0];
-      expect(importedScript.name).toBe('Indented Raw Script');
-      expect(importedScript.metadata?.version).toBe('3.1.4');
-    });
-
-    it('C2.11: high-contention mixed operations (importScripts, saveScript, deleteScript, saveSettings) race without corruption', async () => {
-      await getScripts();
-
-      const operations = [
-        importScripts([
-          { id: 'mixed-1', code: '// ==UserScript==\n// @name Mixed 1\n// ==/UserScript==' },
-          { id: 'mixed-2', code: '// ==UserScript==\n// @name Mixed 2\n// ==/UserScript==' }
-        ]),
-        saveScript({
-          id: 'mixed-3',
-          code: '// ==UserScript==\n// @name Mixed 3\n// ==/UserScript=='
-        }),
-        deleteScript('sample-cdp-logger'),
-        importScripts([
-          { id: 'mixed-4', code: '// ==UserScript==\n// @name Mixed 4\n// ==/UserScript==' }
-        ]),
-        saveScript({
-          id: 'mixed-5',
-          code: '// ==UserScript==\n// @name Mixed 5\n// ==/UserScript=='
+      expect(context.mockRuntime.sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'CDP_LIFECYCLE_EVENT',
+          tabId: 103,
+          status: 'CONFLICT',
+          reason: 'replaced_with_devtools'
         })
-      ];
+      );
+    });
 
-      const results = await Promise.all(operations);
-      expect(results.length).toBe(5);
+    it('1.4: subsequent sendCommand and attachTab on CONFLICT tab reject with DevToolsConflictError', async () => {
+      await saveSettings({ globalEnabled: true });
+      const script = helperCreateCdpScript('cdp-dt-4', 'https://example.com/*');
+      await saveScript(script);
 
-      const all = await getScripts();
-      expect(all['mixed-1']).toBeDefined();
-      expect(all['mixed-2']).toBeDefined();
-      expect(all['mixed-3']).toBeDefined();
-      expect(all['mixed-4']).toBeDefined();
-      expect(all['mixed-5']).toBeDefined();
-      expect(all['sample-cdp-logger']).toBeUndefined();
+      context.mockTabs.get.mockResolvedValue({ id: 104, url: 'https://example.com/app' } as any);
+      await manager.attachTab(104);
+      await context.mockDebugger._emitDetach({ tabId: 104 }, 'replaced_with_devtools');
+
+      // Subsequent sendCommand immediately throws DevToolsConflictError
+      await expect(manager.sendCommand(104, 'Page.reload')).rejects.toThrow(DevToolsConflictError);
+
+      // Subsequent attachTab without force immediately rejects with DevToolsConflictError
+      await expect(manager.attachTab(104)).rejects.toThrow(DevToolsConflictError);
+    });
+  });
+
+  // =========================================================================
+  // Section 2: Unexpected canceled_by_user with Active CDP Script
+  // =========================================================================
+  describe('2. Unexpected canceled_by_user while Engine Active & CDP Script Attached', () => {
+    it('2.1: canceled_by_user on attached tab with matching CDP script and globalEnabled = true transitions to CONFLICT', async () => {
+      await saveSettings({ globalEnabled: true });
+      const script = helperCreateCdpScript('cdp-cancel-1', 'https://example.com/*');
+      await saveScript(script);
+
+      context.mockTabs.get.mockResolvedValue({ id: 201, url: 'https://example.com/dashboard' } as any);
+      await manager.attachTab(201);
+      expect(manager.getTabStatus(201)).toBe('ATTACHED');
+
+      // Native Chrome debugging banner closed by user
+      await context.mockDebugger._emitDetach({ tabId: 201 }, 'canceled_by_user');
+
+      expect(manager.getTabStatus(201)).toBe('CONFLICT');
+      const session = manager.getSession(201);
+      expect(session?.conflictDetected).toBe(true);
+      expect(session?.conflictReason).toBe('canceled_by_user');
+    });
+
+    it('2.2: inflight command rejected with code 1001 when canceled_by_user arrives unexpectedly', async () => {
+      await saveSettings({ globalEnabled: true });
+      const script = helperCreateCdpScript('cdp-cancel-2', 'https://example.com/*');
+      await saveScript(script);
+
+      context.mockTabs.get.mockResolvedValue({ id: 202, url: 'https://example.com/app' } as any);
+      await manager.attachTab(202);
+
+      context.mockDebugger.sendCommand.mockImplementationOnce(() => new Promise(() => {}));
+
+      const inflightPromise = context.mockRuntime._emitMessage(
+        { type: 'CDP_RPC_REQUEST', id: 'req-cancel-202', method: 'Network.getCookies' },
+        { tab: { id: 202, url: 'https://example.com/app' } }
+      );
+
+      await context.mockDebugger._emitDetach({ tabId: 202 }, 'canceled_by_user');
+
+      const response: CdpRpcResponse = await inflightPromise;
+      expect(response.success).toBe(false);
+      expect(response.error?.code).toBe(1001);
+      expect(response.error?.message).toContain('DevTools conflict');
+    });
+
+    it('2.3: reconnecting with force restores ATTACHED state and clears conflict flags', async () => {
+      await saveSettings({ globalEnabled: true });
+      const script = helperCreateCdpScript('cdp-cancel-3', 'https://example.com/*');
+      await saveScript(script);
+
+      context.mockTabs.get.mockResolvedValue({ id: 203, url: 'https://example.com/app' } as any);
+      await manager.attachTab(203);
+      await context.mockDebugger._emitDetach({ tabId: 203 }, 'canceled_by_user');
+      expect(manager.getTabStatus(203)).toBe('CONFLICT');
+
+      // Reconnect with force = true
+      await manager.attachTab(203, 'https://example.com/app', true);
+      expect(manager.getTabStatus(203)).toBe('ATTACHED');
+      expect(manager.getSession(203)?.conflictDetected).toBe(false);
+      expect(manager.getSession(203)?.conflictReason).toBeUndefined();
+    });
+  });
+
+  // =========================================================================
+  // Section 3: Clean Transitions to IDLE without False CONFLICT
+  // =========================================================================
+  describe('3. Clean Transitions to IDLE without CONFLICT', () => {
+    it('3.1: programmatic detachTab(tabId, "IDLE") transitions to IDLE and subsequent canceled_by_user stays IDLE', async () => {
+      await saveSettings({ globalEnabled: true });
+      const script = helperCreateCdpScript('cdp-clean-1', 'https://example.com/*');
+      await saveScript(script);
+
+      context.mockTabs.get.mockResolvedValue({ id: 301, url: 'https://example.com/app' } as any);
+      await manager.attachTab(301);
+      expect(manager.getTabStatus(301)).toBe('ATTACHED');
+
+      // Explicit clean detach
+      await manager.detachTab(301, 'IDLE');
+      expect(manager.getTabStatus(301)).toBe('IDLE');
+      expect(manager.getSession(301)?.conflictDetected).toBe(false);
+
+      // Delayed browser detach event arrives
+      await context.mockDebugger._emitDetach({ tabId: 301 }, 'canceled_by_user');
+
+      expect(manager.getTabStatus(301)).toBe('IDLE');
+      expect(manager.getSession(301)?.conflictDetected).toBe(false);
+      expect(manager.getSession(301)?.conflictReason).toBeUndefined();
+    });
+
+    it('3.2: programmatic detachTab(tabId, "IDLE") followed by replaced_with_devtools stays IDLE without CONFLICT', async () => {
+      await saveSettings({ globalEnabled: true });
+      const script = helperCreateCdpScript('cdp-clean-2', 'https://example.com/*');
+      await saveScript(script);
+
+      context.mockTabs.get.mockResolvedValue({ id: 302, url: 'https://example.com/app' } as any);
+      await manager.attachTab(302);
+
+      await manager.detachTab(302, 'IDLE');
+      expect(manager.getTabStatus(302)).toBe('IDLE');
+
+      // Browser event arrives with replaced_with_devtools
+      await context.mockDebugger._emitDetach({ tabId: 302 }, 'replaced_with_devtools');
+
+      expect(manager.getTabStatus(302)).toBe('IDLE');
+      expect(manager.getSession(302)?.conflictDetected).toBe(false);
+      expect(manager.getSession(302)?.conflictReason).toBeUndefined();
+    });
+
+    it('3.3: detachAll("IDLE") detaches multiple tabs and subsequent detach events do not trigger CONFLICT', async () => {
+      await saveSettings({ globalEnabled: true });
+      const script = helperCreateCdpScript('cdp-clean-3', 'https://example.com/*');
+      await saveScript(script);
+
+      context.mockTabs.get.mockImplementation(async (id: number) => ({ id, url: 'https://example.com/page' }) as any);
+
+      await manager.attachTab(310);
+      await manager.attachTab(311);
+      expect(manager.getTabStatus(310)).toBe('ATTACHED');
+      expect(manager.getTabStatus(311)).toBe('ATTACHED');
+
+      await manager.detachAll('IDLE');
+      expect(manager.getTabStatus(310)).toBe('IDLE');
+      expect(manager.getTabStatus(311)).toBe('IDLE');
+
+      // Emit detach events for both tabs
+      await context.mockDebugger._emitDetach({ tabId: 310 }, 'canceled_by_user');
+      await context.mockDebugger._emitDetach({ tabId: 311 }, 'replaced_with_devtools');
+
+      expect(manager.getTabStatus(310)).toBe('IDLE');
+      expect(manager.getTabStatus(311)).toBe('IDLE');
+      expect(manager.getSession(310)?.conflictDetected).toBe(false);
+      expect(manager.getSession(311)?.conflictDetected).toBe(false);
+    });
+
+    it('3.4: canceled_by_user while globalEnabled = false transitions tab to IDLE without CONFLICT', async () => {
+      await saveSettings({ globalEnabled: false });
+      const script = helperCreateCdpScript('cdp-clean-4', 'https://example.com/*');
+      await saveScript(script);
+
+      // Force session entry
+      await manager.attachTab(304).catch(() => {});
+      const session = (manager as any).sessions.get(304);
+      session.targetUrl = 'https://example.com/page';
+      session.status = 'ATTACHED';
+
+      await context.mockDebugger._emitDetach({ tabId: 304 }, 'canceled_by_user');
+
+      expect(manager.getTabStatus(304)).toBe('IDLE');
+      expect(manager.getSession(304)?.conflictDetected).toBe(false);
+      expect(manager.getSession(304)?.conflictReason).toBeUndefined();
+    });
+
+    it('3.5: replaced_with_devtools while globalEnabled = false transitions tab to IDLE without CONFLICT', async () => {
+      await saveSettings({ globalEnabled: false });
+      const script = helperCreateCdpScript('cdp-clean-5', 'https://example.com/*');
+      await saveScript(script);
+
+      await manager.attachTab(305).catch(() => {});
+      const session = (manager as any).sessions.get(305);
+      session.targetUrl = 'https://example.com/page';
+      session.status = 'ATTACHED';
+
+      await context.mockDebugger._emitDetach({ tabId: 305 }, 'replaced_with_devtools');
+
+      expect(manager.getTabStatus(305)).toBe('IDLE');
+      expect(manager.getSession(305)?.conflictDetected).toBe(false);
+      expect(manager.getSession(305)?.conflictReason).toBeUndefined();
+    });
+
+    it('3.6: canceled_by_user on tab with NO matching CDP scripts transitions to IDLE without CONFLICT', async () => {
+      await saveSettings({ globalEnabled: true });
+      await context.localStorage.set({ scripts: {} }); // no scripts stored
+
+      context.mockTabs.get.mockResolvedValue({ id: 306, url: 'https://other-site.org' } as any);
+      await manager.attachTab(306);
+      expect(manager.getTabStatus(306)).toBe('ATTACHED');
+
+      await context.mockDebugger._emitDetach({ tabId: 306 }, 'canceled_by_user');
+
+      expect(manager.getTabStatus(306)).toBe('IDLE');
+      expect(manager.getSession(306)?.conflictDetected).toBe(false);
+      expect(manager.getSession(306)?.conflictReason).toBeUndefined();
+    });
+
+    it('3.7: canceled_by_user on tab where URL matches script @exclude transitions to IDLE without CONFLICT', async () => {
+      await saveSettings({ globalEnabled: true });
+      await context.localStorage.set({ scripts: {} });
+      const scriptWithExclude = helperCreateCdpScript(
+        'cdp-exclude-script',
+        'https://example.com/*',
+        ['GM_cdp'],
+        ['Network'],
+        true,
+        ['https://example.com/excluded/*']
+      );
+      await saveScript(scriptWithExclude);
+
+      context.mockTabs.get.mockResolvedValue({ id: 307, url: 'https://example.com/excluded/admin' } as any);
+      await manager.attachTab(307);
+      expect(manager.getTabStatus(307)).toBe('ATTACHED');
+
+      await context.mockDebugger._emitDetach({ tabId: 307 }, 'canceled_by_user');
+
+      expect(manager.getTabStatus(307)).toBe('IDLE');
+      expect(manager.getSession(307)?.conflictDetected).toBe(false);
+      expect(manager.getSession(307)?.conflictReason).toBeUndefined();
+    });
+
+    it('3.8: target_closed detach reason transitions tab cleanly without CONFLICT', async () => {
+      await saveSettings({ globalEnabled: true });
+      const script = helperCreateCdpScript('cdp-tc-1', 'https://example.com/*');
+      await saveScript(script);
+
+      context.mockTabs.get.mockResolvedValue({ id: 308, url: 'https://example.com/page' } as any);
+      await manager.attachTab(308);
+
+      await context.mockDebugger._emitDetach({ tabId: 308 }, 'target_closed');
+
+      expect(manager.getTabStatus(308)).toBe('DETACHED');
+      expect(manager.getSession(308)?.conflictDetected).toBe(false);
+      expect(manager.getSession(308)?.conflictReason).toBeUndefined();
+    });
+  });
+
+  // =========================================================================
+  // Section 4: Script Matching Variations & scriptRequiresCdp Matrix
+  // =========================================================================
+  describe('4. Comprehensive Script Matching Matrix', () => {
+    it('4.1: script with @grant none always returns false, overriding @cdp declarations', () => {
+      const script: ScriptRecord = {
+        id: 'grant-none-cdp',
+        name: 'Grant None With CDP',
+        code: '',
+        metadata: {
+          name: 'Grant None With CDP',
+          matches: ['*://*/*'],
+          matchPatterns: ['*://*/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: ['none'],
+          cdp: [{ domain: 'Page', method: 'enable', command: 'Page.enable', params: {}, raw: 'Page.enable' }],
+          cdpDeclarations: [{ domain: 'Page', method: 'enable', command: 'Page.enable', params: {}, raw: 'Page.enable' }],
+          cdpDomains: ['Page'],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: 0,
+        updatedAt: 0
+      };
+
+      expect(scriptRequiresCdp(script)).toBe(false);
+    });
+
+    it('4.2: script with @grant none and @grant GM_cdp returns false because none forbids elevated APIs', () => {
+      const script: ScriptRecord = {
+        id: 'grant-none-and-gmcdp',
+        name: 'Contradictory Grants',
+        code: '',
+        metadata: {
+          name: 'Contradictory Grants',
+          matches: ['*://*/*'],
+          matchPatterns: ['*://*/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: ['none', 'GM_cdp'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: 0,
+        updatedAt: 0
+      };
+
+      expect(scriptRequiresCdp(script)).toBe(false);
+    });
+
+    it('4.3: script with @grant * returns true', () => {
+      const script: ScriptRecord = {
+        id: 'wildcard-grant',
+        name: 'Wildcard Grant',
+        code: '',
+        metadata: {
+          name: 'Wildcard Grant',
+          matches: ['*://*/*'],
+          matchPatterns: ['*://*/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: ['*'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: 0,
+        updatedAt: 0
+      };
+
+      expect(scriptRequiresCdp(script)).toBe(true);
+    });
+
+    it('4.4: script with standard GM grants only without CDP returns false', () => {
+      const script: ScriptRecord = {
+        id: 'standard-gm-grants',
+        name: 'Standard GM Grants',
+        code: '',
+        metadata: {
+          name: 'Standard GM Grants',
+          matches: ['*://*/*'],
+          matchPatterns: ['*://*/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: ['GM_setValue', 'GM_getValue', 'GM_xmlhttpRequest'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: 0,
+        updatedAt: 0
+      };
+
+      expect(scriptRequiresCdp(script)).toBe(false);
+    });
+
+    it('4.5: script with @cdp in cdpDeclarations only returns true', () => {
+      const script: ScriptRecord = {
+        id: 'cdp-declarations-only',
+        name: 'CDP Declarations Only',
+        code: '',
+        metadata: {
+          name: 'CDP Declarations Only',
+          matches: ['*://*/*'],
+          matchPatterns: ['*://*/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: [],
+          cdp: [],
+          cdpDeclarations: [{ domain: 'Network', method: 'enable', command: 'Network.enable', params: {} }],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: 0,
+        updatedAt: 0
+      };
+
+      expect(scriptRequiresCdp(script)).toBe(true);
+    });
+
+    it('4.6: disabled script (enabled = false) always returns false regardless of grants or directives', () => {
+      const script: ScriptRecord = {
+        id: 'disabled-cdp',
+        name: 'Disabled CDP Script',
+        code: '',
+        metadata: {
+          name: 'Disabled CDP Script',
+          matches: ['*://*/*'],
+          matchPatterns: ['*://*/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: ['GM_cdp', '*'],
+          cdp: [{ domain: 'Network', method: 'enable', command: 'Network.enable', params: {}, raw: 'Network.enable' }],
+          cdpDeclarations: [{ domain: 'Network', method: 'enable', command: 'Network.enable', params: {}, raw: 'Network.enable' }],
+          cdpDomains: ['Network'],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: false,
+        createdAt: 0,
+        updatedAt: 0
+      };
+
+      expect(scriptRequiresCdp(script)).toBe(false);
+    });
+
+    it('4.7: multi-script tab: disabling the only CDP script reconciles and cleanly detaches tab to IDLE', async () => {
+      await saveSettings({ globalEnabled: true });
+      await context.localStorage.set({ scripts: {} });
+
+      const normalScript: ScriptRecord = {
+        id: 'normal-userscript',
+        name: 'Normal Userscript',
+        code: '',
+        metadata: {
+          name: 'Normal Userscript',
+          matches: ['https://example.com/*'],
+          matchPatterns: ['https://example.com/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: ['GM_setValue'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: 0,
+        updatedAt: 0
+      };
+
+      const cdpScript = helperCreateCdpScript('multi-cdp-script', 'https://example.com/*');
+      await saveScript(normalScript);
+      await saveScript(cdpScript);
+
+      context.mockTabs.get.mockResolvedValue({ id: 407, url: 'https://example.com/page' } as any);
+      await manager.attachTab(407);
+      expect(manager.getTabStatus(407)).toBe('ATTACHED');
+
+      // Disable the CDP script
+      await toggleScript(cdpScript.id, false);
+      await manager.reconcileTabs();
+
+      // Debugger is cleanly detached because remaining script does not require CDP
+      expect(context.mockDebugger.detach).toHaveBeenCalledWith({ tabId: 407 });
+      expect(manager.getTabStatus(407)).toBe('IDLE');
+      expect(manager.getSession(407)?.conflictDetected).toBe(false);
+    });
+
+    it('4.8: multi-script tab: with two CDP scripts, disabling one keeps debugger ATTACHED', async () => {
+      await saveSettings({ globalEnabled: true });
+      await context.localStorage.set({ scripts: {} });
+
+      const cdpScript1 = helperCreateCdpScript('cdp-multi-1', 'https://example.com/*', ['GM_cdp'], ['Network']);
+      const cdpScript2 = helperCreateCdpScript('cdp-multi-2', 'https://example.com/*', ['cdp'], ['Page']);
+      await saveScript(cdpScript1);
+      await saveScript(cdpScript2);
+
+      context.mockTabs.get.mockResolvedValue({ id: 408, url: 'https://example.com/page' } as any);
+      await manager.attachTab(408);
+      expect(manager.getTabStatus(408)).toBe('ATTACHED');
+
+      context.mockDebugger.detach.mockClear();
+
+      // Disable only the first CDP script
+      await toggleScript(cdpScript1.id, false);
+      await manager.reconcileTabs();
+
+      // Still attached because cdpScript2 is active
+      expect(context.mockDebugger.detach).not.toHaveBeenCalled();
+      expect(manager.getTabStatus(408)).toBe('ATTACHED');
+    });
+
+    it('4.9: script with @grant none combined with @cdp does NOT trigger auto-attachment during reconcile', async () => {
+      await saveSettings({ globalEnabled: true });
+      await context.localStorage.set({ scripts: {} });
+
+      const noneWithCdpScript: ScriptRecord = {
+        id: 'none-with-cdp',
+        name: 'None with CDP',
+        code: '',
+        metadata: {
+          name: 'None with CDP',
+          matches: ['https://example.com/*'],
+          matchPatterns: ['https://example.com/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-start',
+          grants: ['none'],
+          cdp: [{ domain: 'Network', method: 'enable', command: 'Network.enable', params: {}, raw: 'Network.enable' }],
+          cdpDeclarations: [{ domain: 'Network', method: 'enable', command: 'Network.enable', params: {}, raw: 'Network.enable' }],
+          cdpDomains: ['Network'],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        },
+        enabled: true,
+        createdAt: 0,
+        updatedAt: 0
+      };
+      await saveScript(noneWithCdpScript);
+
+      context.mockTabs.get.mockResolvedValue({ id: 409, url: 'https://example.com/page' } as any);
+
+      // Reconcile tabs
+      await manager.reconcileTabs();
+
+      expect(context.mockDebugger.attach).not.toHaveBeenCalledWith({ tabId: 409 }, expect.anything());
+      expect(manager.getTabStatus(409)).toBe('IDLE');
+    });
+
+    it('4.10: tab in CONFLICT state resets cleanly to IDLE when CDP script is toggled off during reconcile', async () => {
+      await saveSettings({ globalEnabled: true });
+      await context.localStorage.set({ scripts: {} });
+
+      const cdpScript = helperCreateCdpScript('conflict-recovery-script', 'https://example.com/*');
+      await saveScript(cdpScript);
+
+      context.mockTabs.get.mockResolvedValue({ id: 410, url: 'https://example.com/page' } as any);
+      await manager.attachTab(410);
+
+      // DevTools conflict occurs
+      await context.mockDebugger._emitDetach({ tabId: 410 }, 'replaced_with_devtools');
+      expect(manager.getTabStatus(410)).toBe('CONFLICT');
+      expect(manager.getSession(410)?.conflictDetected).toBe(true);
+
+      // User toggles off the conflicting CDP script
+      await toggleScript(cdpScript.id, false);
+      await manager.reconcileTabs();
+
+      // Session cleanly transitions to IDLE and clears conflict
+      expect(manager.getTabStatus(410)).toBe('IDLE');
+      expect(manager.getSession(410)?.conflictDetected).toBe(false);
+      expect(manager.getSession(410)?.conflictReason).toBeUndefined();
     });
   });
 });

@@ -9,10 +9,14 @@ import {
   DevToolsConflictError,
   CdpDeclaration,
   ScriptRecord,
-  ReconnectCdpResponse
+  ReconnectCdpResponse,
+  AppSettings,
+  scriptRequiresCdp
 } from '@/shared/types';
 import { isRestrictedUrl, matchesAny } from '@/shared/match-pattern';
-import { getScriptList, getSettings, AsyncMutex } from '@/shared/storage';
+import { getScriptList, getSettings, AsyncMutex, DEFAULT_SETTINGS, DEFAULT_SCRIPTS } from '@/shared/storage';
+
+export { scriptRequiresCdp };
 
 export interface TabSessionInternal {
   tabId: number;
@@ -27,6 +31,8 @@ export interface TabSessionInternal {
   operationLock: Promise<void> | null;
   currentOp?: 'attach' | 'detach' | null;
   targetUrl?: string;
+  cleanDetach?: boolean;
+  desiredStatus?: DebuggerSessionStatus;
 }
 
 export interface InflightRequestTracker {
@@ -79,9 +85,14 @@ export class TabDebuggerManager {
   private inflightTracker: InflightRequestTracker | null = null;
   private initialized = false;
 
+  private cachedSettings: AppSettings | null = null;
+  private cachedScripts: ScriptRecord[] = [];
+  private reconcileMutex = new AsyncMutex();
+
   private onBeforeNavigateBound = this.handleNavigation.bind(this);
   private onDetachBound = this.handleDetach.bind(this);
   private onTabRemovedBound = this.handleTabRemoved.bind(this);
+  private storageOnChangedBound = this.handleStorageChanged.bind(this);
 
   /**
    * Binds an inflight command tracker (CdpBridgeServer) for single-owner detach rejection.
@@ -106,8 +117,23 @@ export class TabDebuggerManager {
       if (chrome.tabs?.onRemoved) {
         chrome.tabs.onRemoved.addListener(this.onTabRemovedBound);
       }
+      if (chrome.storage?.onChanged) {
+        chrome.storage.onChanged.addListener(this.storageOnChangedBound);
+      }
 
       await this.reconcileTargets();
+    }
+
+    try {
+      this.cachedSettings = await getSettings();
+    } catch {
+      this.cachedSettings = { ...DEFAULT_SETTINGS };
+    }
+
+    try {
+      this.cachedScripts = await getScriptList();
+    } catch {
+      this.cachedScripts = Object.values(DEFAULT_SCRIPTS);
     }
 
     this.initialized = true;
@@ -129,11 +155,77 @@ export class TabDebuggerManager {
       if (chrome.tabs?.onRemoved) {
         chrome.tabs.onRemoved.removeListener(this.onTabRemovedBound);
       }
+      if (chrome.storage?.onChanged) {
+        chrome.storage.onChanged.removeListener(this.storageOnChangedBound);
+      }
     }
 
     this.sessions.clear();
     this.lifecycleListeners.clear();
+    this.cachedSettings = null;
+    this.cachedScripts = [];
     this.initialized = false;
+  }
+
+  /**
+   * Listens for changes to extension settings and userscripts.
+   */
+  private handleStorageChanged(
+    changes: Record<string, chrome.storage.StorageChange>,
+    areaName: string
+  ): void {
+    if (areaName === 'local' || !areaName) {
+      if (changes.settings) {
+        const newSettings = changes.settings.newValue as AppSettings | undefined;
+        this.cachedSettings = newSettings || null;
+        if (newSettings && typeof newSettings.globalEnabled === 'boolean') {
+          if (!newSettings.globalEnabled) {
+            this.detachAll('IDLE').catch((err) => {
+              console.error('[TabDebuggerManager] Error detaching all tabs on global disable:', err);
+            });
+          } else {
+            this.reconcileTabs().catch((err) => {
+              console.error('[TabDebuggerManager] Error reconciling tabs on global enable:', err);
+            });
+          }
+        }
+      }
+
+      if (changes.scripts) {
+        if (changes.scripts.newValue && typeof changes.scripts.newValue === 'object') {
+          this.cachedScripts = Object.values(changes.scripts.newValue);
+        } else {
+          getScriptList().then((list) => { this.cachedScripts = list; }).catch(() => {});
+        }
+        this.reconcileTabs().catch((err) => {
+          console.error('[TabDebuggerManager] Error reconciling tabs on scripts change:', err);
+        });
+      }
+    }
+  }
+
+  /**
+   * Checks if any active, enabled userscripts requiring CDP match the target URL.
+   */
+  private hasActiveCdpScripts(targetUrl?: string): boolean {
+    const scripts = this.cachedScripts || [];
+    if (scripts.length === 0) return false;
+
+    if (targetUrl) {
+      if (!isAttachableTarget(targetUrl)) return false;
+      return scripts.some((script) => {
+        if (!scriptRequiresCdp(script)) return false;
+        if (matchesAny(script.metadata?.excludes || [], targetUrl)) return false;
+        const patterns = script.metadata?.matches?.length
+          ? script.metadata.matches
+          : script.metadata?.matchPatterns?.length
+          ? script.metadata.matchPatterns
+          : script.metadata?.includes || [];
+        return matchesAny(patterns, targetUrl);
+      });
+    }
+
+    return scripts.some((script) => scriptRequiresCdp(script));
   }
 
   private createSession(tabId: number): TabSessionInternal {
@@ -352,12 +444,32 @@ export class TabDebuggerManager {
 
   /**
    * Detaches debugger from target tab and updates status.
+   * Supports targetStatus ('DETACHED' | 'IDLE'), resets conflict flags on IDLE,
+   * clears active domains, and notifies UI listeners.
    */
-  async detachTab(tabId: number): Promise<void> {
+  async detachTab(
+    tabId: number,
+    targetStatus: DebuggerSessionStatus = 'DETACHED'
+  ): Promise<void> {
     const session = this.sessions.get(tabId);
     if (!session) return;
 
-    if (session.status === 'DETACHED' && !session.operationLock) {
+    if (session.status === targetStatus && !session.attached && !session.operationLock) {
+      return;
+    }
+
+    if (!session.attached && session.status !== 'ATTACHED' && session.status !== 'ATTACHING') {
+      session.status = targetStatus;
+      session.cleanDetach = false;
+      session.desiredStatus = undefined;
+      session.activeDomains.clear();
+      if (targetStatus === 'IDLE') {
+        session.conflictDetected = false;
+        session.conflictReason = undefined;
+      }
+      session.updatedAt = Date.now();
+      await this.persistSession(session);
+      this.broadcastLifecycle(tabId, targetStatus === 'IDLE' ? 'DETACHED' : targetStatus);
       return;
     }
 
@@ -375,6 +487,8 @@ export class TabDebuggerManager {
     });
     session.operationLock = detachLock;
     session.currentOp = 'detach';
+    session.cleanDetach = true;
+    session.desiredStatus = targetStatus;
 
     try {
       if (prevLock) {
@@ -383,7 +497,7 @@ export class TabDebuggerManager {
         } catch {}
       }
 
-      if (session.status === 'DETACHED') {
+      if (session.status === targetStatus && !session.attached) {
         return;
       }
 
@@ -393,16 +507,22 @@ export class TabDebuggerManager {
             await chrome.debugger.detach({ tabId });
           }
         } catch {} finally {
-          session.status = 'DETACHED';
+          session.status = targetStatus;
           session.attached = false;
           session.activeDomains.clear();
+          if (targetStatus === 'IDLE') {
+            session.conflictDetected = false;
+            session.conflictReason = undefined;
+          }
+          session.cleanDetach = false;
+          session.desiredStatus = undefined;
           session.updatedAt = Date.now();
 
           if (this.inflightTracker) {
             const error = {
               code: 1002,
-              message: `Debugger detached from tab: detached`,
-              data: { reason: 'detached' }
+              message: `Debugger detached from tab: ${targetStatus.toLowerCase()}`,
+              data: { reason: targetStatus.toLowerCase() }
             };
             if (typeof this.inflightTracker.rejectPendingRequestsForTab === 'function') {
               this.inflightTracker.rejectPendingRequestsForTab(tabId, error);
@@ -412,7 +532,7 @@ export class TabDebuggerManager {
           }
 
           await this.persistSession(session);
-          this.broadcastLifecycle(tabId, 'DETACHED');
+          this.broadcastLifecycle(tabId, targetStatus === 'IDLE' ? 'DETACHED' : targetStatus);
         }
       };
 
@@ -424,6 +544,46 @@ export class TabDebuggerManager {
         session.currentOp = null;
       }
     }
+  }
+
+  /**
+   * Detaches all currently attached tabs in parallel.
+   */
+  public async detachAll(targetStatus: DebuggerSessionStatus = 'IDLE'): Promise<void> {
+    const tabIdsToDetach = new Set<number>();
+    for (const [tabId, session] of this.sessions.entries()) {
+      if (session.status === 'ATTACHED' || session.status === 'ATTACHING' || session.attached) {
+        tabIdsToDetach.add(tabId);
+      } else if (targetStatus === 'IDLE' && (session.status === 'CONFLICT' || session.status === 'DETACHED')) {
+        session.status = 'IDLE';
+        session.attached = false;
+        session.conflictDetected = false;
+        session.conflictReason = undefined;
+        session.activeDomains.clear();
+        session.updatedAt = Date.now();
+        this.persistSession(session).catch(() => {});
+        this.broadcastLifecycle(tabId, 'DETACHED');
+      }
+    }
+
+    if (typeof chrome !== 'undefined' && chrome.debugger?.getTargets) {
+      try {
+        const targets = await chrome.debugger.getTargets();
+        for (const t of targets) {
+          if (t.attached && typeof t.tabId === 'number') {
+            if (!this.sessions.has(t.tabId)) {
+              chrome.debugger.detach({ tabId: t.tabId }).catch(() => {});
+            } else {
+              tabIdsToDetach.add(t.tabId);
+            }
+          }
+        }
+      } catch {}
+    }
+
+    await Promise.allSettled(
+      Array.from(tabIdsToDetach).map((tabId) => this.detachTab(tabId, targetStatus))
+    );
   }
 
   /**
@@ -593,6 +753,8 @@ export class TabDebuggerManager {
 
   /**
    * Handles chrome.debugger.onDetach events.
+   * Classifies reason properly to avoid false CONFLICT states when engine is disabled,
+   * when clean detachment was requested, or when no matching CDP scripts are active on the tab.
    */
   handleDetach(source: chrome.debugger.Debuggee, reason: string): void {
     const tabId = source.tabId;
@@ -601,7 +763,24 @@ export class TabDebuggerManager {
     const session = this.sessions.get(tabId);
     if (!session) return;
 
-    const isConflict = reason === 'canceled_by_user' || reason === 'replaced_with_devtools';
+    const isCleanDetach =
+      session.currentOp === 'detach' ||
+      session.cleanDetach === true ||
+      session.status === 'IDLE' ||
+      session.status === 'DETACHED';
+
+    const isEngineDisabled = this.cachedSettings !== null && !this.cachedSettings.globalEnabled;
+
+    const hasActiveCdp = this.hasActiveCdpScripts(session.targetUrl);
+
+    let isConflict = false;
+    if (!isCleanDetach && !isEngineDisabled && hasActiveCdp) {
+      if (reason === 'replaced_with_devtools' || reason === 'canceled_by_user') {
+        isConflict = true;
+      }
+    }
+
+    session.cleanDetach = false;
 
     if (this.inflightTracker) {
       const error = isConflict
@@ -632,12 +811,19 @@ export class TabDebuggerManager {
       this.persistSession(session).catch(() => {});
       this.broadcastLifecycle(tabId, 'CONFLICT', reason);
     } else {
-      session.status = 'DETACHED';
+      const targetStatus: DebuggerSessionStatus =
+        session.desiredStatus ??
+        (session.status === 'IDLE' || isEngineDisabled || !hasActiveCdp ? 'IDLE' : 'DETACHED');
+      session.status = targetStatus;
       session.attached = false;
       session.activeDomains.clear();
+      if (targetStatus === 'IDLE') {
+        session.conflictDetected = false;
+        session.conflictReason = undefined;
+      }
       session.updatedAt = Date.now();
       this.persistSession(session).catch(() => {});
-      this.broadcastLifecycle(tabId, 'DETACHED', reason);
+      this.broadcastLifecycle(tabId, targetStatus === 'IDLE' ? 'DETACHED' : targetStatus, reason);
     }
   }
 
@@ -691,6 +877,103 @@ export class TabDebuggerManager {
         }
       }
     } catch {}
+  }
+
+  /**
+   * Reconciles debugger sessions across tracked tabs based on global settings and matching CDP userscripts.
+   * - If globalEnabled is false or autoAttachDebugger is false, detaches all active sessions to IDLE.
+   * - If a tab has no matching enabled scripts requiring CDP, cleanly detaches session to IDLE.
+   * - If an enabled script requiring CDP matches the tab, attaches (if autoAttachDebugger) and initializes declared domains.
+   */
+  public async reconcileTabs(): Promise<void> {
+    await this.reconcileMutex.runExclusive(async () => {
+      let settings = this.cachedSettings;
+      if (!settings) {
+        try {
+          settings = await getSettings();
+          this.cachedSettings = settings;
+        } catch {
+          settings = { ...DEFAULT_SETTINGS };
+        }
+      }
+
+      if (!settings.globalEnabled || !settings.autoAttachDebugger) {
+        await this.detachAll('IDLE');
+        return;
+      }
+
+      let allScripts = this.cachedScripts;
+      try {
+        allScripts = await getScriptList();
+        this.cachedScripts = allScripts;
+      } catch {}
+
+      const tabIds = Array.from(this.sessions.keys());
+      await Promise.all(
+        tabIds.map(async (tabId) => {
+          const session = this.sessions.get(tabId);
+          if (!session) return;
+
+          let targetUrl = session.targetUrl;
+          if (!targetUrl && typeof chrome !== 'undefined' && chrome.tabs?.get) {
+            try {
+              const tab = await chrome.tabs.get(tabId);
+              if (tab?.url) {
+                targetUrl = tab.url;
+                if (this.sessions.has(tabId)) {
+                  this.sessions.get(tabId)!.targetUrl = targetUrl;
+                }
+              }
+            } catch {}
+          }
+
+          if (!this.sessions.has(tabId)) return;
+
+          if (!targetUrl || !isAttachableTarget(targetUrl)) {
+            if (session.status === 'ATTACHED' || session.status === 'ATTACHING' || session.attached) {
+              await this.detachTab(tabId, 'IDLE');
+            }
+            return;
+          }
+
+          const matchingCdpScripts = allScripts.filter((script) => {
+            if (!scriptRequiresCdp(script)) return false;
+            if (matchesAny(script.metadata?.excludes || [], targetUrl)) return false;
+            const patterns = script.metadata?.matches?.length
+              ? script.metadata.matches
+              : script.metadata?.matchPatterns?.length
+              ? script.metadata.matchPatterns
+              : script.metadata?.includes || [];
+            return matchesAny(patterns, targetUrl);
+          });
+
+          if (matchingCdpScripts.length === 0) {
+            if (session.status === 'ATTACHED' || session.status === 'ATTACHING' || session.attached) {
+              await this.detachTab(tabId, 'IDLE');
+            } else if (session.status === 'CONFLICT') {
+              session.status = 'IDLE';
+              session.conflictDetected = false;
+              session.conflictReason = undefined;
+              session.activeDomains.clear();
+              session.updatedAt = Date.now();
+              await this.persistSession(session);
+              this.broadcastLifecycle(tabId, 'DETACHED');
+            }
+          } else {
+            if (session.status === 'ATTACHED') {
+              await this.initializeDeclaredDomains(tabId, targetUrl);
+            } else if (session.status === 'IDLE' || session.status === 'DETACHED') {
+              if (!session.conflictDetected) {
+                const attached = await this.attach(tabId, settings.debuggerProtocolVersion || '1.3');
+                if (attached && this.sessions.has(tabId)) {
+                  await this.initializeDeclaredDomains(tabId, targetUrl);
+                }
+              }
+            }
+          }
+        })
+      );
+    });
   }
 
   /**
@@ -822,7 +1105,10 @@ export class TabDebuggerManager {
     session.status = status;
     session.attached = status === 'ATTACHED';
     session.conflictDetected = status === 'CONFLICT';
-    if (reason) {
+    if (status === 'IDLE') {
+      session.conflictReason = undefined;
+      session.activeDomains.clear();
+    } else if (reason) {
       if (status === 'CONFLICT') {
         session.conflictReason = reason;
       } else {

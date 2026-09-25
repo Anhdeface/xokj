@@ -9,7 +9,7 @@ import type {
   ReconnectCdpResponse
 } from '@/shared/types';
 import { DevToolsConflictError } from '@/shared/types';
-import { AsyncMutex } from '@/shared/storage';
+import { AsyncMutex, getSettings } from '@/shared/storage';
 
 export { DevToolsConflictError };
 
@@ -127,20 +127,35 @@ export class DevToolsConflictHandler {
     const tabId = source.tabId;
     if (typeof tabId !== 'number') return;
 
-    const isConflict = reason === 'canceled_by_user' || reason === 'replaced_with_devtools';
-    const targetStatus: DebuggerSessionStatus = isConflict ? 'CONFLICT' : 'DETACHED';
+    let isEngineDisabled = false;
+    try {
+      const settings = await getSettings();
+      if (settings && !settings.globalEnabled) {
+        isEngineDisabled = true;
+      }
+    } catch {}
 
-    const conflictError = new DevToolsConflictError(
-      tabId,
-      reason,
-      isConflict
-        ? 'DevTools conflict: native developer tools opened on tab'
-        : `CDP session detached: ${reason}`
-    );
+    const isCleanDetach =
+      this.debuggerController?.getTabStatus(tabId) === 'IDLE' ||
+      this.debuggerController?.getTabStatus(tabId) === 'DETACHED';
+
+    const isConflict =
+      !isCleanDetach &&
+      !isEngineDisabled &&
+      (reason === 'canceled_by_user' || reason === 'replaced_with_devtools');
+    const targetStatus: DebuggerSessionStatus = isConflict ? 'CONFLICT' : (isEngineDisabled ? 'IDLE' : 'DETACHED');
+
+    const conflictError = isConflict
+      ? new DevToolsConflictError(
+          tabId,
+          reason,
+          'DevTools conflict: native developer tools opened on tab'
+        )
+      : new Error(`CDP session detached: ${reason}`);
 
     // Reject all inflight command promises for this tab
     if (this.inflightTracker) {
-      this.inflightTracker.rejectInflightForTab(tabId, conflictError);
+      this.inflightTracker.rejectInflightForTab(tabId, conflictError as any);
     }
 
     // Update memory state
@@ -235,7 +250,8 @@ export class DevToolsConflictHandler {
       status,
       attached: status === 'ATTACHED',
       conflictDetected: status === 'CONFLICT',
-      conflictReason: reason,
+      conflictReason: status === 'CONFLICT' ? reason : undefined,
+      activeDomains: status === 'IDLE' ? [] : undefined,
       updatedAt: Date.now()
     };
 

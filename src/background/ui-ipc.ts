@@ -107,6 +107,7 @@ export class UiIpcServer {
         (async () => {
           try {
             const newStatus = await toggleScript(scriptId, enabled);
+            await this.debuggerMgr.reconcileTabs();
             const response: ToggleScriptResponse = { success: true, enabled: newStatus };
             sendResponse(response);
           } catch (err: any) {
@@ -121,6 +122,11 @@ export class UiIpcServer {
         (async () => {
           try {
             const updated = await saveSettings({ globalEnabled: enabled });
+            if (!enabled) {
+              await this.debuggerMgr.detachAll('IDLE');
+            } else {
+              await this.debuggerMgr.reconcileTabs();
+            }
             const response: ToggleGlobalResponse = { success: true, enabled: updated.globalEnabled };
             sendResponse(response);
           } catch (err: any) {

@@ -138,6 +138,29 @@ export interface ScriptFilter {
   domain?: string;
 }
 
+/**
+ * Determines whether a userscript is active and requires Chrome DevTools Protocol (CDP).
+ * Checks that the script is enabled, grants do not include 'none', and the script declares
+ * @cdp directives, cdpDomains, or grants GM_cdp, cdp, or '*'.
+ */
+export function scriptRequiresCdp(script: ScriptRecord): boolean {
+  if (!script || !script.enabled) return false;
+  const grants = Array.isArray(script.metadata?.grants) ? script.metadata.grants : [];
+  if (grants.includes('none')) return false;
+
+  const hasCdpDirectives =
+    (Array.isArray(script.metadata?.cdpDeclarations) && script.metadata.cdpDeclarations.length > 0) ||
+    (Array.isArray(script.metadata?.cdp) && script.metadata.cdp.length > 0) ||
+    (Array.isArray(script.metadata?.cdpDomains) && script.metadata.cdpDomains.length > 0);
+
+  const hasCdpGrants =
+    grants.includes('GM_cdp') ||
+    grants.includes('cdp') ||
+    grants.includes('*');
+
+  return hasCdpDirectives || hasCdpGrants;
+}
+
 // 3. Chrome DevTools Protocol (CDP) RPC Message Protocol
 
 /**
