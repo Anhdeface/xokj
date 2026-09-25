@@ -14,7 +14,7 @@ import type {
 } from '@/shared/types';
 import { DevToolsConflictError } from '@/shared/types';
 import { isRestrictedUrl, matchesAny } from '@/shared/match-pattern';
-import { getScript } from '@/shared/storage';
+import { getScript, getScripts, onScriptsChanged } from '@/shared/storage';
 
 /**
  * Interface for optional TabDebuggerManager integration.
@@ -78,6 +78,8 @@ export class CdpBridgeServer {
   private attachLocks = new Map<number, Promise<void>>();
   private attachedTabs = new Set<number>();
   private isListening = false;
+  private scriptCache = new Map<string, ScriptRecord>();
+  private unsubscribeScriptsChanged?: () => void;
 
   private handleMessageBound = this.handleMessage.bind(this);
   private handleDebuggerEventBound = this.handleDebuggerEvent.bind(this);
@@ -123,10 +125,27 @@ export class CdpBridgeServer {
         chrome.debugger.onDetach.addListener(this.handleDebuggerDetachBound);
       }
 
-      // Tab destruction cleanup: prune closed tabs and reject inflight promises
       if (chrome.tabs?.onRemoved) {
         chrome.tabs.onRemoved.addListener(this.handleTabRemovedBound);
       }
+    }
+
+    if (!this.unsubscribeScriptsChanged) {
+      this.unsubscribeScriptsChanged = onScriptsChanged((scripts) => {
+        this.scriptCache.clear();
+        for (const [id, script] of Object.entries(scripts)) {
+          this.scriptCache.set(id, script);
+        }
+      });
+      getScripts()
+        .then((scripts) => {
+          if (this.scriptCache.size === 0 && scripts) {
+            for (const [id, script] of Object.entries(scripts)) {
+              this.scriptCache.set(id, script);
+            }
+          }
+        })
+        .catch(() => {});
     }
 
     this.isListening = true;
@@ -141,6 +160,12 @@ export class CdpBridgeServer {
    */
   public destroy(): void {
     if (!this.isListening) return;
+
+    if (this.unsubscribeScriptsChanged) {
+      this.unsubscribeScriptsChanged();
+      this.unsubscribeScriptsChanged = undefined;
+    }
+    this.scriptCache.clear();
 
     if (typeof chrome !== 'undefined') {
       chrome.runtime?.onMessage?.removeListener?.(this.handleMessageBound);
@@ -305,8 +330,14 @@ export class CdpBridgeServer {
 
     const trimmedId = scriptId.trim();
 
-    // 2. Registry existence check
-    const script = await this.scriptResolver(trimmedId);
+    // 2. Registry existence check (uses in-memory cache to avoid disk reads & deep-cloning)
+    let script: ScriptRecord | null = this.scriptCache.get(trimmedId) || null;
+    if (!script) {
+      script = await this.scriptResolver(trimmedId);
+      if (script) {
+        this.scriptCache.set(trimmedId, script);
+      }
+    }
     if (!script) {
       return {
         code: 403,
@@ -421,6 +452,19 @@ export class CdpBridgeServer {
   }
 
   /**
+   * Helper to remove a request ID from tabRequests and prune the tab entry if empty.
+   */
+  private removeTabRequest(tabId: number, id: string): void {
+    const reqs = this.tabRequests.get(tabId);
+    if (reqs) {
+      reqs.delete(id);
+      if (reqs.size === 0) {
+        this.tabRequests.delete(tabId);
+      }
+    }
+  }
+
+  /**
    * Executes a CDP command on target tab with timeout tracking and auto-attachment.
    */
   public async executeCommand(
@@ -478,7 +522,7 @@ export class CdpBridgeServer {
 
           clearTimeout(timer);
           this.inflightRequests.delete(id);
-          this.tabRequests.get(tabId)?.delete(id);
+          this.removeTabRequest(tabId, id);
 
           const isConflict =
             attachErr instanceof DevToolsConflictError ||
@@ -508,7 +552,7 @@ export class CdpBridgeServer {
       if (typeof chrome === 'undefined' || !chrome.debugger?.sendCommand) {
         clearTimeout(timer);
         this.inflightRequests.delete(id);
-        this.tabRequests.get(tabId)?.delete(id);
+        this.removeTabRequest(tabId, id);
         resolve({
           type: 'CDP_RPC_RESPONSE',
           id,
@@ -528,7 +572,7 @@ export class CdpBridgeServer {
 
           clearTimeout(timer);
           this.inflightRequests.delete(id);
-          this.tabRequests.get(tabId)?.delete(id);
+          this.removeTabRequest(tabId, id);
 
           resolve({
             type: 'CDP_RPC_RESPONSE',
@@ -542,7 +586,7 @@ export class CdpBridgeServer {
 
           clearTimeout(timer);
           this.inflightRequests.delete(id);
-          this.tabRequests.get(tabId)?.delete(id);
+          this.removeTabRequest(tabId, id);
 
           const errMsg = cmdErr?.message || String(cmdErr) || 'CDP command failed';
           const isConflict =
@@ -737,7 +781,7 @@ export class CdpBridgeServer {
     if (!entry) return;
 
     this.inflightRequests.delete(id);
-    this.tabRequests.get(entry.tabId)?.delete(id);
+    this.removeTabRequest(entry.tabId, id);
 
     entry.resolve({
       type: 'CDP_RPC_RESPONSE',
@@ -871,6 +915,7 @@ export class CdpBridgeServer {
   public markTabDetached(tabId: number): void {
     this.attachedTabs.delete(tabId);
     this.attachLocks.delete(tabId);
+    this.tabRequests.delete(tabId);
   }
 
   public getAttachedTabs(): number[] {

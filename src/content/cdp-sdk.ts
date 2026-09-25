@@ -62,6 +62,9 @@ export class CdpClient implements ICdpClient {
   private eventUnsub?: () => void;
 
   private handleWindowMessageBound = this.handleWindowMessage.bind(this);
+  private handlePageHideBound = () => {
+    this.destroy();
+  };
 
   constructor(options: CdpClientOptions = {}) {
     this.channelId = options.channelId;
@@ -75,7 +78,7 @@ export class CdpClient implements ICdpClient {
   }
 
   /**
-   * Initializes listeners on transport or window message events.
+   * Initializes listeners on transport or window message events, and hooks pagehide for teardown.
    */
   public init(): void {
     if (this.isListening) return;
@@ -98,11 +101,15 @@ export class CdpClient implements ICdpClient {
       window.addEventListener('message', this.handleWindowMessageBound);
     }
 
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('pagehide', this.handlePageHideBound, { once: true });
+    }
+
     this.isListening = true;
   }
 
   /**
-   * Cleans up listeners and cancels pending requests.
+   * Cleans up listeners, cancels pending requests, and clears timers.
    */
   public destroy(): void {
     if (!this.isListening) return;
@@ -112,6 +119,7 @@ export class CdpClient implements ICdpClient {
 
     if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
       window.removeEventListener('message', this.handleWindowMessageBound);
+      window.removeEventListener('pagehide', this.handlePageHideBound);
     }
 
     for (const [id, entry] of this.pendingRequests.entries()) {
@@ -122,6 +130,13 @@ export class CdpClient implements ICdpClient {
     this.pendingRequests.clear();
     this.eventListeners.clear();
     this.isListening = false;
+  }
+
+  /**
+   * Disconnects the client, cancelling pending requests and unregistering listeners.
+   */
+  public disconnect(): void {
+    this.destroy();
   }
 
   /**
@@ -476,83 +491,184 @@ export function getIsolatedScriptStore(scriptId: string): Map<string, string> {
   return store;
 }
 
+// Automatically clear isolated storage on page navigation/unload
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('pagehide', () => {
+    clearIsolatedGmStorage();
+  });
+}
+
 /**
- * Constructs standard GM_* helper APIs for a given script.
+ * Constructs standard GM_* helper APIs for a given script or scriptId.
+ * Supports:
+ * - createGmApi(script: ScriptRecord, cdp?: CdpClient, explicitGrants?: string[])
+ * - createGmApi(scriptId: string, grants?: string[] | null, channelId?: string)
  */
-export function createGmApi(script: ScriptRecord, cdp: CdpClient): Record<string, unknown> {
-  const scriptId = script.id || 'script';
+export function createGmApi(
+  script: ScriptRecord,
+  cdp?: CdpClient,
+  explicitGrants?: string[]
+): Record<string, unknown>;
+export function createGmApi(
+  scriptId: string,
+  grants?: string[] | null,
+  channelId?: string
+): Record<string, unknown>;
+export function createGmApi(
+  scriptOrId: ScriptRecord | string,
+  cdpOrGrants?: CdpClient | string[] | null,
+  channelIdOrGrants?: string | string[]
+): Record<string, unknown> {
+  let scriptId: string;
+  let scriptName = 'userscript';
+  let scriptVersion = '1.0.0';
+  let scriptDescription = '';
+  let scriptMatches: string[] = [];
+  let grants: string[] | undefined | null;
+  let cdp: CdpClient | undefined;
+  let channelId: string | undefined;
+  let isScriptRecord = false;
 
-  const GM_setValue = (key: string, value: unknown): void => {
-    getIsolatedScriptStore(scriptId).set(key, JSON.stringify(value));
-  };
+  if (typeof scriptOrId === 'string') {
+    scriptId = scriptOrId || 'script';
+    scriptName = scriptOrId || 'userscript';
 
-  const GM_getValue = (key: string, defaultValue?: unknown): unknown => {
-    const raw = getIsolatedScriptStore(scriptId).get(key);
-    if (raw === null || raw === undefined) {
-      return defaultValue;
+    if (Array.isArray(cdpOrGrants)) {
+      grants = cdpOrGrants;
+      channelId = typeof channelIdOrGrants === 'string' ? channelIdOrGrants : undefined;
+    } else if (cdpOrGrants === null || cdpOrGrants === undefined) {
+      grants = cdpOrGrants;
+      channelId = typeof channelIdOrGrants === 'string' ? channelIdOrGrants : undefined;
+    } else if (typeof cdpOrGrants === 'object' && 'send' in cdpOrGrants) {
+      cdp = cdpOrGrants as CdpClient;
+      grants = Array.isArray(channelIdOrGrants) ? channelIdOrGrants : undefined;
     }
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return defaultValue;
+  } else {
+    isScriptRecord = true;
+    const script = scriptOrId;
+    scriptId = script.id || 'script';
+    scriptName = script.name || 'userscript';
+    scriptVersion = script.metadata?.version || '1.0.0';
+    scriptDescription = script.metadata?.description || '';
+    scriptMatches = script.metadata?.matches || [];
+
+    if (cdpOrGrants && typeof cdpOrGrants === 'object' && 'send' in cdpOrGrants) {
+      cdp = cdpOrGrants as CdpClient;
     }
-  };
 
-  const GM_deleteValue = (key: string): void => {
-    getIsolatedScriptStore(scriptId).delete(key);
-  };
-
-  const GM_listValues = (): string[] => {
-    return Array.from(getIsolatedScriptStore(scriptId).keys());
-  };
-
-  const GM_addStyle = (css: string): HTMLStyleElement => {
-    const style = document.createElement('style');
-    style.setAttribute('type', 'text/css');
-    style.setAttribute('data-xokj-script', script.id || 'script');
-    style.textContent = css;
-
-    const target = document.head || document.documentElement || document.body;
-    if (target) {
-      target.appendChild(style);
+    if (Array.isArray(channelIdOrGrants)) {
+      grants = channelIdOrGrants;
+    } else if (typeof channelIdOrGrants === 'string') {
+      channelId = channelIdOrGrants;
+      grants = script.metadata?.grants;
     } else {
-      document.addEventListener(
-        'DOMContentLoaded',
-        () => {
-          (document.head || document.documentElement || document.body)?.appendChild(style);
-        },
-        { once: true }
-      );
+      grants = script.metadata?.grants;
     }
-    return style;
-  };
+  }
 
-  const GM_log = (...args: unknown[]): void => {
-    console.log(`[XOKJ: ${script.name || 'userscript'}]`, ...args);
+  const isGrantNone = Array.isArray(grants) && grants.includes('none');
+
+  let instantiateAll = false;
+  if (isScriptRecord && (grants === undefined || grants === null)) {
+    // Legacy ScriptRecord without grants array specified in metadata (test fixtures)
+    instantiateAll = true;
+  } else if (Array.isArray(grants) && grants.includes('*')) {
+    instantiateAll = true;
+  }
+
+  const shouldInstantiate = (grantKey: string): boolean => {
+    if (isGrantNone) return false;
+    if (instantiateAll) return true;
+    return Array.isArray(grants) && grants.includes(grantKey);
   };
 
   const GM_info = {
     script: {
-      name: script.name,
-      version: script.metadata?.version || '1.0.0',
-      description: script.metadata?.description || '',
-      matches: script.metadata?.matches || []
+      name: scriptName,
+      version: scriptVersion,
+      description: scriptDescription,
+      matches: scriptMatches
     },
     scriptHandler: 'XOKJ',
     version: '0.1.0'
   };
 
-  const GM_cdp = createGmCdp(cdp);
-
-  return {
-    GM_setValue,
-    GM_getValue,
-    GM_deleteValue,
-    GM_listValues,
-    GM_addStyle,
-    GM_log,
-    GM_info,
-    GM_cdp,
-    cdp
+  const api: Record<string, unknown> = {
+    GM_info
   };
+
+  if (shouldInstantiate('GM_setValue')) {
+    api['GM_setValue'] = (key: string, value: unknown): void => {
+      getIsolatedScriptStore(scriptId).set(key, JSON.stringify(value));
+    };
+  }
+
+  if (shouldInstantiate('GM_getValue')) {
+    api['GM_getValue'] = (key: string, defaultValue?: unknown): unknown => {
+      const raw = getIsolatedScriptStore(scriptId).get(key);
+      if (raw === null || raw === undefined) {
+        return defaultValue;
+      }
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return defaultValue;
+      }
+    };
+  }
+
+  if (shouldInstantiate('GM_deleteValue')) {
+    api['GM_deleteValue'] = (key: string): void => {
+      getIsolatedScriptStore(scriptId).delete(key);
+    };
+  }
+
+  if (shouldInstantiate('GM_listValues')) {
+    api['GM_listValues'] = (): string[] => {
+      return Array.from(getIsolatedScriptStore(scriptId).keys());
+    };
+  }
+
+  if (shouldInstantiate('GM_addStyle')) {
+    api['GM_addStyle'] = (css: string): HTMLStyleElement => {
+      const style = document.createElement('style');
+      style.setAttribute('type', 'text/css');
+      style.setAttribute('data-xokj-script', scriptId);
+      style.textContent = css;
+
+      const target = document.head || document.documentElement || document.body;
+      if (target) {
+        target.appendChild(style);
+      } else {
+        document.addEventListener(
+          'DOMContentLoaded',
+          () => {
+            (document.head || document.documentElement || document.body)?.appendChild(style);
+          },
+          { once: true }
+        );
+      }
+      return style;
+    };
+  }
+
+  if (shouldInstantiate('GM_log')) {
+    api['GM_log'] = (...args: unknown[]): void => {
+      console.log(`[XOKJ: ${scriptName}]`, ...args);
+    };
+  }
+
+  // Populate CDP capabilities if explicitly requested or wildcard
+  const needsCdp =
+    shouldInstantiate('GM_cdp') ||
+    shouldInstantiate('cdp') ||
+    (cdp && instantiateAll);
+
+  if (needsCdp) {
+    const client = cdp || (channelId ? new CdpClient({ channelId }) : new CdpClient());
+    api['GM_cdp'] = createGmCdp(client);
+    api['cdp'] = client;
+  }
+
+  return api;
 }

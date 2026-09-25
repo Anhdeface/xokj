@@ -10,6 +10,7 @@ import type {
   ReconnectCdpResponse
 } from '@/shared/types';
 import { DevToolsConflictError } from '@/shared/types';
+import { AsyncMutex } from '@/shared/storage';
 
 export { DevToolsConflictError };
 
@@ -33,6 +34,7 @@ export interface TabDebuggerSessionController {
 export class DevToolsConflictHandler {
   private inflightTracker: InflightCommandTracker | null = null;
   private debuggerController: TabDebuggerSessionController | null = null;
+  private sessionMutex = new AsyncMutex();
   private isListening = false;
 
   private handleDetachBound = this.handleDetach.bind(this);
@@ -194,14 +196,9 @@ export class DevToolsConflictHandler {
         }
       } else if (typeof chrome !== 'undefined' && chrome.debugger?.attach) {
         await chrome.debugger.attach({ tabId }, '1.3');
+        await this.persistTabState(tabId, 'ATTACHED');
+        await this.broadcastLifecycle(tabId, 'ATTACHED');
       }
-
-      if (this.debuggerController) {
-        this.debuggerController.setTabStatus(tabId, 'ATTACHED');
-      }
-
-      await this.persistTabState(tabId, 'ATTACHED');
-      await this.broadcastLifecycle(tabId, 'ATTACHED');
 
       return { success: true };
     } catch (err: any) {
@@ -258,13 +255,15 @@ export class DevToolsConflictHandler {
 
       if (chrome.storage?.local?.get && chrome.storage?.local?.set) {
         try {
-          const stored = await chrome.storage.local.get('tab_sessions');
-          const sessions = stored.tab_sessions || {};
-          sessions[tabId] = {
-            ...sessions[tabId],
-            ...sessionRecord
-          };
-          await chrome.storage.local.set({ tab_sessions: sessions });
+          await this.sessionMutex.runExclusive(async () => {
+            const stored = await chrome.storage.local.get('tab_sessions');
+            const sessions = stored.tab_sessions || {};
+            sessions[tabId] = {
+              ...sessions[tabId],
+              ...sessionRecord
+            };
+            await chrome.storage.local.set({ tab_sessions: sessions });
+          });
         } catch {
           // Non-fatal
         }

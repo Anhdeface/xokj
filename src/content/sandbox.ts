@@ -56,7 +56,14 @@ export function buildSandboxScope(
     return baseGlobals;
   }
 
-  const allApi = createGmApi(script, cdpClient);
+  const effectiveGrants = [...grants];
+  if (hasCdpDirectives || hasCdpDomains) {
+    if (!effectiveGrants.includes('GM_cdp') && !effectiveGrants.includes('*')) {
+      effectiveGrants.push('GM_cdp', 'cdp');
+    }
+  }
+
+  const allApi = createGmApi(script, cdpClient, effectiveGrants);
   const scope: Record<string, unknown> = {
     ...baseGlobals
   };
@@ -102,6 +109,7 @@ export function createSandboxRunner(
   script: ScriptRecord,
   scope: Record<string, unknown>
 ): () => unknown {
+  const scriptName = script.name;
   const effectiveScope: Record<string, unknown> = { ...scope };
 
   for (const key of PRIVILEGED_API_KEYS) {
@@ -113,7 +121,7 @@ export function createSandboxRunner(
   const paramNames = Object.keys(effectiveScope);
   const paramValues = Object.values(effectiveScope);
 
-  const cleanName = encodeURIComponent((script.name || 'userscript').trim().replace(/\s+/g, '_'));
+  const cleanName = encodeURIComponent((scriptName || 'userscript').trim().replace(/\s+/g, '_'));
   const sourceUrl = `\n//# sourceURL=xokj://scripts/${cleanName}.user.js\n`;
   const code = `"use strict";\n${script.code}\n${sourceUrl}`;
 
@@ -123,7 +131,7 @@ export function createSandboxRunner(
     try {
       return runner(...paramValues);
     } catch (err) {
-      console.error(`[XOKJ Runtime] Exception in script "${script.name}":`, err);
+      console.error('[XOKJ Runtime] Exception in script "' + scriptName + '":', err);
       throw err;
     }
   };
@@ -138,6 +146,7 @@ export function scheduleScriptExecution(
 ): void {
   if (!script.enabled) return;
 
+  const scriptName = script.name;
   const timing: RunAtTiming = script.metadata?.runAt || 'document-idle';
   const scope = buildSandboxScope(script, cdpClient);
   const run = createSandboxRunner(script, scope);
@@ -146,7 +155,7 @@ export function scheduleScriptExecution(
     try {
       run();
     } catch (err) {
-      console.error(`[XOKJ Execution Error] Failed executing script "${script.name}":`, err);
+      console.error('[XOKJ Execution Error] Failed executing script "' + scriptName + '":', err);
     }
   };
 

@@ -1,16 +1,16 @@
-# XOKJ — Chromium Userscript Manager with Hybrid CDP Architecture
+# XOKJ
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](package.json)
 [![Manifest](https://img.shields.io/badge/manifest-v3-green.svg)](manifest.config.ts)
 [![Vue](https://img.shields.io/badge/vue-3.5.13-emerald.svg)](package.json)
 [![Vite](https://img.shields.io/badge/vite-5.4.14-purple.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-259%20passed-brightgreen.svg)](test/)
+[![Tests](https://img.shields.io/badge/tests-715%20passed-brightgreen.svg)](test/)
 
-**XOKJ** is an advanced, production-ready Chromium Userscript Manager built on **Manifest V3**, **Vue 3**, **Vite**, and `@crxjs/vite-plugin`. It extends traditional userscript functionality (Greasemonkey / Tampermonkey / Violentmonkey) with deep **Chrome DevTools Protocol (CDP)** control plane intervention via `chrome.debugger`.
+XOKJ is a Chromium Userscript Manager built for Manifest V3 using Vue 3, Vite, and `@crxjs/vite-plugin`. In addition to standard userscript execution environments, it provides a Chrome DevTools Protocol (CDP) control plane via `chrome.debugger` to allow userscripts to perform protocol-level operations directly from the webpage execution context.
 
 ---
 
-## 🌟 Key Architecture & Highlights
+## Architecture Overview
 
 ```
                        ┌───────────────────────────────────────────────────────────┐
@@ -45,8 +45,8 @@
                        │              │                            │               │
                        │   ┌──────────▼───────────┐    ┌───────────▼───────────┐   │
                        │   │DevToolsConflictMgr   │    │    ScriptInjector     │   │
-                       │   │ (Safe Inflight Reject│    │(@run-at lifecycle &   │   │
-                       │   │  & Reconnect Engine) │    │ declarative CDP init) │   │
+                       │   │(Conflict Handling &  │    │(@run-at lifecycle &   │   │
+                       │   │ Inflight Rejection)  │    │ declarative CDP init) │   │
                        │   └──────────────────────┘    └───────────────────────┘   │
                        │                             │                             │
                        │                             ▼                             │
@@ -56,58 +56,48 @@
 
 ---
 
-## 🧩 Architectural Subsystems
+## Subsystems & Technical Implementation
 
-### 1. Hybrid CDP Control Plane
-- **Early Declarative Initialization**: Intercepts `chrome.webNavigation.onBeforeNavigate` to pre-attach `chrome.debugger` and enable declared domains (e.g. `Network.enable`, `Page.enable`, `Fetch.enable`) *before* web page resources load.
-- **Asynchronous RPC Bridge**: Full-duplex JSON-RPC routing between web page contexts and `chrome.debugger.sendCommand`, validating tab identity and guarding against cross-tab access.
-- **Event Multiplexer**: Automatically multiplexes `chrome.debugger.onEvent` events (e.g., `Network.requestWillBeSent`, `Page.loadEventFired`) to active userscript listeners.
+### 1. CDP Control Plane & Session Lifecycle
+- **Session State Machine (`TabDebuggerManager`)**: Tracks per-tab debugger sessions through explicit states (`IDLE`, `ATTACHING`, `ATTACHED`, `DETACHED`, `CONFLICT`). Attachment and detachment operations are synchronized per tab to prevent concurrent state corruption.
+- **Declarative Domain Initialization**: Pre-enables domains specified in script metadata (such as `Network.enable`, `Page.enable`, `Fetch.enable`) using parallel `Promise.allSettled` execution when attaching to a tab.
+- **In-Memory Caching & RPC Routing (`CdpBridgeServer`)**: Routes JSON-RPC messages between content script bridges and `chrome.debugger.sendCommand`. Caches parsed script permission rules in memory with reactive invalidation on storage changes to eliminate repeated asynchronous reads during high-frequency command dispatch.
+- **Resource De-retention**: Explicitly prunes empty tracking structures (`tabRequests`) and session state upon request completion or tab closure.
 
-### 2. DevTools Conflict Detection & Recovery
-- **Zero-Crash Conflict Management**: Listens to `chrome.debugger.onDetach` (detecting `canceled_by_user` when native Chrome DevTools opens).
-- **Safe In-Flight Promise Rejection**: Immediately resolves/rejects pending CDP commands with a typed `DevToolsConflictError` (code `1001`), preventing hung background promises and worker crashes.
-- **Visual Alerting & Reconnection**: Emits lifecycle status to UI pages and content scripts, displaying a conflict banner in the Popup UI with a single-click "Reconnect CDP" button once native DevTools is closed.
+### 2. DevTools Conflict Coordination
+- **Attachment Conflict Detection (`DevToolsConflictManager`)**: Listens to `chrome.debugger.onDetach` events for reason `canceled_by_user`, which occurs when a user opens native Chrome DevTools on an attached tab.
+- **In-Flight Request Settlement**: Rejects all pending CDP command promises for the detached tab with error code `1001` (`DevToolsConflictError`) or code `1002` (`DETACHED`), avoiding hanging promises in content scripts or service worker contexts.
+- **State Propagation**: Broadcasts session state changes to the popup UI and content script bridge, allowing manual reconnection once native DevTools is closed.
 
-### 3. Userscript Runtime & Lifecycle Injection
-- **Standards-Compliant Parser**: Full lexical parser for `// ==UserScript==` header blocks (`@name`, `@version`, `@match`, `@include`, `@exclude`, `@run-at`, `@grant`, `@cdp`).
-- **Multi-Phase Injection Pipeline**: Schedules script execution based on `@run-at`:
-  - `document-start`: Injected immediately upon document creation via `chrome.scripting.executeScript` (`injectImmediately: true`).
-  - `document-end`: Injected when DOM is parsed.
-  - `document-idle`: Injected when the page is idle.
-- **Ultra-early CDP Script Injection**: Evaluates scripts prior to script execution via `Page.addScriptToEvaluateOnNewDocument`.
-- **Deduplication Engine**: Navigation-aware injection deduplication tracking `(tabId, frameId, scriptId, url)` tuples to prevent duplicate execution across iframe lifecycles.
+### 3. Userscript Injection Pipeline & Sandboxing
+- **Metadata Parsing (`metadata-parser.ts`)**: Parses standard userscript headers (`@name`, `@version`, `@match`, `@include`, `@exclude`, `@run-at`, `@grant`) alongside custom `@cdp <Domain.method|Domain.enable> [parameters]` declarations.
+- **URL Match Engine (`match-pattern.ts`)**: Implements Chrome match pattern semantics backed by a bounded Least Recently Used (LRU) RegExp compilation cache (capacity: 1,000 entries) to avoid recompiling pattern regular expressions across navigation events.
+- **Injection Scheduling (`injector.ts`)**: Dispatches scripts according to their `@run-at` lifecycle stage (`document-start`, `document-end`, `document-idle`). In-memory settings and script caches reduce I/O during navigation.
+- **Deduplication & Subframe Tracking**: Maintains frame-scoped injection tracking (`Map<tabId, Map<frameId, Set<dedupeKey>>>`). Cleans up frame entries on navigation commit and clears entire tab state upon `chrome.tabs.onRemoved`.
+- **Sandbox Isolation (`sandbox.ts`)**: Evaluates userscripts in the target execution world while binding only declared `@grant` APIs. De-references script source strings and execution closures post-evaluation to facilitate garbage collection.
+- **Content Bridge Relay (`bridge.ts`)**: Implements a zero-allocation fast-path message filter that rejects foreign `window.postMessage` traffic before payload processing. Includes explicit `disconnect()` lifecycle teardown for iframe removal.
 
-### 4. Concurrency-Safe Storage Subsystem
-- **Typed Local Storage**: Strongly-typed repository abstraction around `chrome.storage.local`.
-- **Atomic Operations & Mutex Queue**: Serialized update queue ensuring high-frequency concurrent toggle actions do not produce dual-write hazards or lost updates.
-- **Default Script Pre-seeding**: Bundles initial sample scripts demonstrating declarative CDP Network logging and cookie inspection.
+### 4. Storage Engine & Mutex
+- **FIFO AsyncMutex (`storage.ts`)**: Serializes storage mutation operations (`saveScript`, `toggleScript`, `deleteScript`, `importScripts`, `saveSettings`) to prevent lost-update race conditions in `chrome.storage.local`.
+- **Fast-Path Execution**: Utilizes a synchronous fast-path when uncontended and queues tasks in a linear array to minimize heap allocations.
+- **Batch Processing**: Groups bulk operations during script import into a single mutex acquisition, reading and writing storage once per batch.
 
-### 5. Extension User Interfaces (Vue 3)
-- **Popup UI (`src/popup/`)**:
-  - Displays matching scripts for the active browser tab with individual toggle switches.
-  - Global script execution toggle.
-  - Real-time reactive CDP session badge (`IDLE`, `ATTACHING`, `ATTACHED`, `CONFLICT`).
-  - DevTools conflict banner with **"Reconnect CDP"** action.
-- **Management Dashboard (`src/dashboard/`)**:
-  - Full-page Master-Detail view with search and filter capabilities.
-  - Complete CRUD operations (Create, Edit, Save, Delete, Toggle).
-  - Integrated **CodeMirror 6** editor featuring JavaScript syntax highlighting, line numbers, and dark theme (`one-dark`).
-  - Import / Export script collections as JSON, and reset to defaults.
+### 5. User Interface (Vue 3)
+- **Popup (`src/popup/`)**: Displays matching scripts for the current tab, per-script toggle controls, global execution switch, and real-time CDP session status with manual reconnect capability.
+- **Management Dashboard (`src/dashboard/`)**: Full-page interface for script management (create, edit, delete, toggle, import, export). Integrates CodeMirror 6 with JavaScript syntax highlighting and dark theme support. Bundled with chunk-splitting to isolate editor assets from the main UI script.
 
 ---
 
-## 📜 Custom `@cdp` Metadata Grammar & Userscript API
+## Metadata Specification & Userscript API
 
-### Metadata Declaration
-
-Userscripts declare required CDP capabilities in their header block:
+### Header Block Structure
 
 ```javascript
 // ==UserScript==
-// @name         CDP Network & Cookie Inspector
+// @name         Network and Cookie Logger
 // @namespace    https://xokj.dev/scripts
 // @version      1.0.0
-// @description  Inspect network requests and manage cookies via CDP
+// @description  Demonstrates declarative CDP attachment and event listening
 // @match        https://*.example.com/*
 // @run-at       document-start
 // @grant        GM_cdp
@@ -116,91 +106,95 @@ Userscripts declare required CDP capabilities in their header block:
 // ==/UserScript==
 
 (async () => {
-  // Listen to CDP events broadcast from the background worker
+  // Subscribe to CDP events
   cdp.on('Network.requestWillBeSent', (params) => {
-    console.log('[XOKJ CDP]', params.request.method, params.request.url);
+    console.log('[CDP Event]', params.request.method, params.request.url);
   });
 
-  // Send asynchronous CDP commands
-  const cookies = await cdp.send('Network.getCookies', {
-    urls: ['https://example.com']
-  });
-  console.log('[XOKJ Cookies]', cookies);
+  // Execute CDP methods
+  try {
+    const cookies = await cdp.send('Network.getCookies', {
+      urls: ['https://example.com']
+    });
+    console.log('[CDP Result]', cookies);
+  } catch (err) {
+    console.error('[CDP Error]', err);
+  }
 })();
 ```
 
-### Supported Client-Side SDK Methods
+### Client SDK Methods
 
-| Method | Description |
-|---|---|
-| `cdp.send(method, params)` | Asynchronously execute a CDP method on the current tab and return the result. |
-| `GM_cdp(method, params)` | Alias for `cdp.send` for Tampermonkey/Violentmonkey compatibility. |
-| `cdp.on(event, handler)` | Subscribe to incoming CDP events for the current tab. |
-| `cdp.off(event, handler)` | Unsubscribe from a previously registered CDP event handler. |
+| Method | Parameters | Return Type | Description |
+|---|---|---|---|
+| `cdp.send(method, params?)` | `method: string`, `params?: object` | `Promise<any>` | Sends an asynchronous JSON-RPC command to the CDP session attached to the current tab. |
+| `GM_cdp(method, params?)` | `method: string`, `params?: object` | `Promise<any>` | Alias for `cdp.send`. |
+| `cdp.on(event, handler)` | `event: string`, `handler: (params: any) => void` | `void` | Registers a listener for events dispatched by the CDP control plane. |
+| `cdp.off(event, handler)` | `event: string`, `handler: (params: any) => void` | `void` | Unregisters an existing event listener. |
 
 ---
 
-## 📁 Project Structure
+## Codebase Layout
 
 ```
 xokj/
-├── manifest.config.ts         # Chrome Extension Manifest V3 configuration
-├── vite.config.ts             # Vite build configuration with @crxjs/vite-plugin
-├── vitest.config.ts           # Vitest unit & E2E configuration
-├── tsconfig.json              # TypeScript root configuration
-├── package.json               # Dependencies & build scripts (v0.1.0)
+├── manifest.config.ts         # Manifest V3 declarative configuration
+├── vite.config.ts             # Vite configuration with @crxjs/vite-plugin & code splitting
+├── vitest.config.ts           # Vitest runner configuration
+├── tsconfig.json              # TypeScript compilation options
+├── package.json               # Project dependencies and test scripts
 │
 ├── src/
-│   ├── shared/                # Core domain contracts and utilities
-│   │   ├── types.ts           # Shared TypeScript interfaces (CDP RPC, Scripts, Events)
-│   │   ├── metadata-parser.ts # // ==UserScript== header & @cdp lexical parser
-│   │   ├── match-pattern.ts   # Chromium URL match pattern engine
-│   │   └── storage.ts         # Concurrency-safe chrome.storage.local repository
+│   ├── shared/                # Core data models, parsing, and storage
+│   │   ├── types.ts           # Protocol interfaces, RPC contracts, and script definitions
+│   │   ├── metadata-parser.ts # Lexical parser for // ==UserScript== and @cdp headers
+│   │   ├── match-pattern.ts   # URL pattern matching with LRU regex cache
+│   │   └── storage.ts         # chrome.storage.local repository with FIFO AsyncMutex
 │   │
-│   ├── background/            # Background Service Worker subsystem
-│   │   ├── index.ts           # Service worker entry point
-│   │   ├── debugger-mgr.ts    # chrome.debugger session state machine
-│   │   ├── cdp-bridge.ts      # Full-duplex CDP RPC bridge & event multiplexer
-│   │   ├── conflict-mgr.ts    # Native DevTools conflict detection & recovery
-│   │   ├── injector.ts        # Lifecycle script injection coordinator
-│   │   └── ui-ipc.ts          # IPC handler for popup & dashboard communication
+│   ├── background/            # MV3 Service Worker subsystem
+│   │   ├── index.ts           # Service worker lifecycle and listener registration
+│   │   ├── debugger-mgr.ts    # Per-tab chrome.debugger session state manager
+│   │   ├── cdp-bridge.ts      # RPC routing, permission validation, and event multiplexing
+│   │   ├── conflict-mgr.ts    # Native DevTools conflict detection and rejection handling
+│   │   ├── injector.ts        # Tab/frame lifecycle injection and deduplication engine
+│   │   └── ui-ipc.ts          # IPC handler for popup and dashboard communication
 │   │
-│   ├── content/               # Content Script & Injected Runtime SDK
+│   ├── content/               # Content script and execution sandbox
 │   │   ├── index.ts           # Content script entry point
-│   │   ├── bridge.ts          # Window postMessage ↔ chrome.runtime message relay
-│   │   ├── sandbox.ts         # Userscript execution sandbox & @grant isolation
-│   │   └── cdp-sdk.ts         # Client-side cdp.send() / GM_cdp SDK
+│   │   ├── bridge.ts          # Window postMessage <-> chrome.runtime message bridge
+│   │   ├── sandbox.ts         # Main-world userscript sandbox and @grant API binder
+│   │   └── cdp-sdk.ts         # Client-side cdp / GM_cdp API client
 │   │
-│   ├── popup/                 # Compact Popup UI (Vue 3)
-│   │   ├── index.html         # Popup entry HTML
-│   │   ├── main.ts            # Vue 3 mount point
-│   │   ├── App.vue            # Popup root view
+│   ├── popup/                 # Extension popup interface (Vue 3)
+│   │   ├── index.html         # Entry HTML
+│   │   ├── main.ts            # Vue mount point
+│   │   ├── App.vue            # Root view
 │   │   ├── components/        # ScriptCard, CdpStatusBadge, ConflictBanner, GlobalControls
-│   │   └── composables/       # usePopupState composable
+│   │   └── composables/       # Reactive popup state composable
 │   │
-│   └── dashboard/             # Management Dashboard UI (Vue 3 + CodeMirror 6)
-│       ├── index.html         # Dashboard entry HTML
-│       ├── main.ts            # Vue 3 mount point
-│       ├── App.vue            # Dashboard root view
+│   └── dashboard/             # Management dashboard interface (Vue 3 + CodeMirror 6)
+│       ├── index.html         # Entry HTML
+│       ├── main.ts            # Vue mount point
+│       ├── App.vue            # Root view
 │       └── components/        # ScriptEditor, ScriptList, ScriptMetadataInspector
 │
-└── test/                      # Test Suites (259 passing tests)
-    ├── mocks/                 # Headless chrome.* API mock suite
-    ├── unit/                  # Unit test suites (parser, matchers, cdp-bridge, ui, storage)
-    └── e2e/                   # Full pipeline E2E integration test suite
+└── test/                      # Test suites (715 passing tests across 37 files)
+    ├── mocks/                 # In-memory chrome.* API mock harness
+    ├── unit/                  # Unit and component tests
+    └── e2e/                   # Pipeline and integration test suites
 ```
 
 ---
 
-## 🛠️ Getting Started
+## Development & Build Verification
 
-### Prerequisites
+### Requirements
 - Node.js >= 18.0.0
 - npm >= 9.0.0
 
-### Installation
+### Setup
 ```bash
-# Clone repository
+# Clone the repository
 git clone https://github.com/Anhdeface/xokj.git
 cd xokj
 
@@ -208,36 +202,40 @@ cd xokj
 npm install
 ```
 
-### Running Tests
+### Running Tests & Type Checks
 ```bash
-# Run all 259 unit, adversarial, and E2E integration tests
+# Run full test suite (715 tests across 37 files)
 npm test
 
 # Run tests in watch mode
 npm run test:watch
+
+# Run TypeScript type validation
+npm run type-check
 ```
 
-### Building the Extension
+### Production Build
 ```bash
-# Type-check and compile Manifest V3 bundle
+# Compile and package extension into dist/
 npm run build
 ```
-The compiled extension bundle will be output to the `dist/` directory.
 
-### Loading into Chromium / Chrome / Brave / Edge
-1. Open your browser and navigate to `chrome://extensions`.
-2. Enable **Developer mode** (toggle in the top-right corner).
-3. Click **Load unpacked** and select the `dist/` folder in the project directory.
-
----
-
-## 🔒 Security & Sandboxing Model
-
-1. **Tab ID Isolation**: The background service worker strictly enforces `sender.tab.id` for all CDP operations. A script running in Tab A cannot issue commands targeting Tab B.
-2. **System URL Protection**: CDP operations and script injection are blocked on restricted scheme pages (`chrome://*`, `edge://*`, `chrome-extension://*`, Chrome Web Store).
-3. **Promise Invalidation**: When native DevTools attaches, all in-flight debugger commands are immediately aborted and rejected, preventing dangling resources and service worker exhaustion.
+### Loading the Extension in Chromium
+1. Navigate to `chrome://extensions` (or `brave://extensions`, `edge://extensions`).
+2. Enable **Developer mode** toggle.
+3. Click **Load unpacked** and select the `dist/` directory.
 
 ---
 
-## 📄 License
+## Security Model & Boundary Constraints
+
+1. **Tab Identity Enforcement**: The service worker verifies `sender.tab.id` on all incoming RPC requests. Commands cannot target arbitrary tab IDs outside the caller's context.
+2. **Channel Token & Origin Verification**: Inter-world communication between the MAIN world and the ISOLATED world uses structured message validation with runtime channel identifiers.
+3. **Restricted Scheme Protection**: Script injection and debugger attachment are disallowed on browser internal schemes (`chrome://*`, `edge://*`, `chrome-extension://*`, and the Chrome Web Store).
+4. **Deterministic In-Flight Settlement**: Upon unexpected debugger detachment (e.g., native DevTools opened or tab closed), all unresolved CDP promises are rejected immediately with structured error codes to prevent resource leaks.
+
+---
+
+## License
+
 MIT License. See [LICENSE](LICENSE) for details.

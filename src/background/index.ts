@@ -35,14 +35,16 @@ export const scriptInjector = new ScriptInjector({
 // 5. Initialize UI IPC server wired to debugger manager
 export const uiIpcServer = new UiIpcServer(debuggerMgr);
 
-// 6. Start all services
-async function initSubsystems(): Promise<void> {
+// 6. Start all services synchronously to guarantee MV3 listener registration in the initial turn
+function initSubsystems(): void {
   try {
-    await debuggerMgr.init();
     cdpBridge.init();
     conflictHandler.init();
     scriptInjector.init();
     uiIpcServer.init();
+    debuggerMgr.init().catch((err) => {
+      console.error('[XOKJ Background] debuggerMgr.init failed:', err);
+    });
     console.log('[XOKJ Background] All CDP, conflict, injector, and UI-IPC subsystems successfully initialized');
   } catch (err) {
     console.error('[XOKJ Background] Failed to initialize subsystems:', err);

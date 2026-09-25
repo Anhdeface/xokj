@@ -13,7 +13,7 @@ import {
   ReconnectCdpResponse
 } from '@/shared/types';
 import { isRestrictedUrl, matchesAny } from '@/shared/match-pattern';
-import { getScriptList, getSettings, storageMutex } from '@/shared/storage';
+import { getScriptList, getSettings, AsyncMutex } from '@/shared/storage';
 
 export interface TabSessionInternal {
   tabId: number;
@@ -75,6 +75,7 @@ export function aggregateCdpDeclarations(scripts: ScriptRecord[]): CdpDeclaratio
 
 export class TabDebuggerManager {
   private sessions = new Map<number, TabSessionInternal>();
+  private sessionStorageMutex = new AsyncMutex();
   private lifecycleListeners = new Set<LifecycleListener>();
   private inflightTracker: InflightRequestTracker | null = null;
   private initialized = false;
@@ -606,25 +607,23 @@ export class TabDebuggerManager {
     const session = this.sessions.get(tabId);
     if (!session || !this.sessions.has(tabId) || session.status !== 'ATTACHED') return;
 
-    for (const decl of declarations) {
-      if (!this.sessions.has(tabId) || session.status !== 'ATTACHED') {
-        break;
-      }
-
-      try {
-        await chrome.debugger.sendCommand({ tabId }, decl.command, decl.params || {});
-        session.activeDomains.add(decl.domain);
-      } catch (err) {
-        console.warn(`[TabDebuggerManager] Declarative command ${decl.command} failed on tab ${tabId}:`, err);
-        if (!this.sessions.has(tabId) || session.status !== 'ATTACHED') {
-          break;
+    await Promise.allSettled(
+      declarations.map(async (decl) => {
+        if (!this.sessions.has(tabId) || this.sessions.get(tabId)?.status !== 'ATTACHED') {
+          return;
         }
-      }
 
-      if (!this.sessions.has(tabId) || session.status !== 'ATTACHED') {
-        break;
-      }
-    }
+        try {
+          await chrome.debugger.sendCommand({ tabId }, decl.command, decl.params || {});
+          const currentSession = this.sessions.get(tabId);
+          if (currentSession && currentSession.status === 'ATTACHED') {
+            currentSession.activeDomains.add(decl.domain);
+          }
+        } catch (err) {
+          console.warn(`[TabDebuggerManager] Declarative command ${decl.command} failed on tab ${tabId}:`, err);
+        }
+      })
+    );
   }
 
   /**
@@ -696,7 +695,7 @@ export class TabDebuggerManager {
 
       if (chrome.storage?.local?.get && chrome.storage?.local?.set) {
         try {
-          await storageMutex.runExclusive(async () => {
+          await this.sessionStorageMutex.runExclusive(async () => {
             const stored = await chrome.storage.local.get('tab_sessions');
             if (stored?.tab_sessions && stored.tab_sessions[tabId] !== undefined) {
               const updated = { ...stored.tab_sessions };
@@ -767,7 +766,7 @@ export class TabDebuggerManager {
 
       if (chrome.storage?.local?.get && chrome.storage?.local?.set) {
         try {
-          await storageMutex.runExclusive(async () => {
+          await this.sessionStorageMutex.runExclusive(async () => {
             if (!this.sessions.has(session.tabId)) return;
             const stored = await chrome.storage.local.get('tab_sessions');
             const sessions = stored.tab_sessions || {};

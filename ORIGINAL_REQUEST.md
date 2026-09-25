@@ -100,3 +100,42 @@ Integrity mode: development
 ## Follow-up — 2026-09-23T06:26:14Z
 
 The server has restarted. All agent state in `.agents/` is intact. Please resume teamwork_preview execution from your current state in `.agents/orchestrator_1/progress.md` (Milestone 4: Content Script Bridge & Security Isolation, Iteration 2). Check on your subagents' status, re-dispatch/resume orchestrator, workers, reviewers, challengers, and auditors as needed, and drive Milestone 4 to completion and victory audit.
+
+## Follow-up — 2026-09-24T06:12:15Z
+
+This is a focused optimization and performance refinement task; keep it small and focused.
+
+Working directory: /home/quanh/Documents/xokj
+Integrity mode: development
+
+Audit and optimize the `xokj` Chromium Userscript Manager codebase to maximize runtime performance, reduce memory footprint, eliminate redundant computations/allocations during script injection and CDP routing, and streamline build/injection pipelines while maintaining 100% test integrity and strict security isolation.
+
+## Requirements
+
+### R1. Performance & Memory Optimization Audit
+Audit the core runtime paths (`src/background/injector.ts`, `src/background/debugger-mgr.ts`, `src/background/cdp-bridge.ts`, `src/content/bridge.ts`, `src/content/sandbox.ts`, and `src/shared/storage.ts`) to identify unnecessary object allocations, redundant listeners/maps, uncollected closures, and latency bottlenecks during script injection and message passing.
+
+### R2. Injection & Build Pipeline Refinements
+Optimize the userscript injection lifecycle and packaging/build configurations (Vite, TypeScript, script matching caches) so that matching, declarative CDP checks, and script dispatch execute with minimal overhead and zero memory leaks across navigation and subframe lifecycles.
+
+### R3. Quality Assurance & Zero Regression
+Ensure all optimizations maintain full architectural stability, strict isolation, and passing status across all existing Vitest test suites and production build pipelines.
+
+## Acceptance Criteria
+
+### Performance & Memory Standards
+- [ ] Injection history and session maps properly cleanup and prune stale entries upon tab/frame destruction, avoiding memory retention.
+- [ ] Script matching, storage mutex operations, and CDP message forwarding incur minimal overhead without blocking event loops.
+
+### Test & Build Integrity
+- [ ] 100% passing across all 25 test files and 540+ unit/e2e tests (`npm test`).
+- [ ] Type check (`npm run type-check` / `vue-tsc --noEmit`) passes with 0 errors.
+- [ ] Production build (`npm run build`) completes successfully without regressions.
+
+## Follow-up — 2026-09-24T10:22:02Z
+
+The server was restarted. Please resume the teamwork execution, check on the orchestrator and workers for Milestone 2, revive them, restart background progress/liveness crons, and continue with full speed to finish all milestones through Phase 4.
+
+## Follow-up — 2026-09-25T04:39:49Z
+
+Quota has reset. Please resume teamwork execution, revive the active orchestrator / subagents, finalize Milestone 3 evaluations, execute Milestone 4 (packaging, build & asset optimization), and complete Phase 3 final acceptance gate and Phase 4 final reporting.

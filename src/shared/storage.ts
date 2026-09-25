@@ -215,7 +215,7 @@ async function getStorageItem<T>(key: string): Promise<T | undefined> {
     return undefined;
   }
   const result = await chrome.storage.local.get(key);
-  return result[key] !== undefined ? deepClone(result[key] as T) : undefined;
+  return result[key] !== undefined ? (result[key] as T) : undefined;
 }
 
 /**
@@ -225,17 +225,17 @@ async function setStorageItem<T>(key: string, value: T): Promise<void> {
   if (typeof chrome === 'undefined' || !chrome.storage?.local) {
     return;
   }
-  await chrome.storage.local.set({ [key]: deepClone(value) });
+  await chrome.storage.local.set({ [key]: value });
 }
 
 /**
  * Asynchronous FIFO Mutex for serializing storage read-modify-write transactions.
  * Guarantees strict FIFO execution order, rejection isolation (a failing task does
- * not poison subsequent tasks), and zero memory leaks via idle queue reset.
+ * not poison subsequent tasks), and zero memory leaks via array-backed resolver queue.
  */
 export class AsyncMutex {
-  private queue: Promise<unknown> = Promise.resolve();
-  private pendingCount = 0;
+  private locked = false;
+  private queue: Array<() => void> = [];
 
   /**
    * Executes an asynchronous task exclusively.
@@ -243,25 +243,28 @@ export class AsyncMutex {
    * the caller receives the error, but subsequent queued tasks proceed normally.
    */
   public async runExclusive<T>(task: () => Promise<T> | T): Promise<T> {
-    this.pendingCount++;
-    const prev = this.queue;
+    if (typeof task !== 'function') {
+      throw new TypeError('Task must be a function');
+    }
 
-    const next = (async () => {
-      await prev;
-      return await task();
-    })();
-
-    // Ensure queue tail always settles cleanly, preventing unhandled rejections
-    // and ensuring subsequent tasks are never blocked by upstream rejections.
-    this.queue = next.catch(() => {});
+    if (this.locked) {
+      // Contended path: wait for our turn in FIFO queue
+      await new Promise<void>((resolve) => {
+        this.queue.push(resolve);
+      });
+    } else {
+      // Synchronous uncontended fast-path: acquire lock immediately without microtask delay
+      this.locked = true;
+    }
 
     try {
-      return await next;
+      return await task();
     } finally {
-      this.pendingCount--;
-      if (this.pendingCount === 0) {
-        // Break closure retention chain when queue is completely idle
-        this.queue = Promise.resolve();
+      const next = this.queue.shift();
+      if (next) {
+        next();
+      } else {
+        this.locked = false;
       }
     }
   }
@@ -270,7 +273,7 @@ export class AsyncMutex {
    * Returns true if the mutex is currently locked or has tasks waiting in queue.
    */
   public isLocked(): boolean {
-    return this.pendingCount > 0;
+    return this.locked;
   }
 }
 
@@ -348,9 +351,9 @@ async function getScriptsInternal(): Promise<Record<string, ScriptRecord>> {
   if (scripts === undefined || scripts === null) {
     const initial = deepClone(DEFAULT_SCRIPTS);
     await setStorageItem(STORAGE_KEYS.SCRIPTS, initial);
-    return deepClone(initial);
+    return initial;
   }
-  return deepClone(scripts);
+  return scripts;
 }
 
 /**
@@ -358,14 +361,14 @@ async function getScriptsInternal(): Promise<Record<string, ScriptRecord>> {
  */
 async function getSettingsInternal(): Promise<AppSettings> {
   const settings = await getStorageItem<AppSettings>(STORAGE_KEYS.SETTINGS);
-  return settings ? deepClone(settings) : deepClone(DEFAULT_SETTINGS);
+  return settings ? settings : deepClone(DEFAULT_SETTINGS);
 }
 
 /**
  * Retrieves all stored scripts.
  * If storage is empty, safely acquires mutex to seed with DEFAULT_SCRIPTS.
  * Once initialized, serves direct parallel reads with zero mutex contention.
- * Always returns deep-cloned records to protect internal storage.
+ * Always returns records to protect internal storage.
  */
 export async function getScripts(): Promise<Record<string, ScriptRecord>> {
   const scripts = await getStorageItem<Record<string, ScriptRecord>>(STORAGE_KEYS.SCRIPTS);
@@ -374,7 +377,7 @@ export async function getScripts(): Promise<Record<string, ScriptRecord>> {
       return getScriptsInternal();
     });
   }
-  return deepClone(scripts);
+  return scripts;
 }
 
 /**
@@ -512,7 +515,7 @@ export async function resetToDefaultScripts(): Promise<Record<string, ScriptReco
   return storageMutex.runExclusive(async () => {
     const defaults = deepClone(DEFAULT_SCRIPTS);
     await setStorageItem(STORAGE_KEYS.SCRIPTS, defaults);
-    return deepClone(defaults);
+    return defaults;
   });
 }
 

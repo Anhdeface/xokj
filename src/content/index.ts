@@ -20,7 +20,7 @@ if (typeof window !== 'undefined') {
   window.addEventListener(
     'pagehide',
     () => {
-      bridge.destroy();
+      bridge.disconnect();
     },
     { once: true }
   );

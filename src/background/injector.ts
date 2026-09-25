@@ -6,9 +6,9 @@
  * match patterns, @run-at timing stages, and early CDP domain sync.
  */
 
-import type { ScriptRecord, RunAtTiming } from '@/shared/types';
+import type { ScriptRecord, RunAtTiming, AppSettings } from '@/shared/types';
 import { matchesAny, isRestrictedUrl } from '@/shared/match-pattern';
-import { getScriptList, getSettings } from '@/shared/storage';
+import { getScriptList, getSettings, onScriptsChanged } from '@/shared/storage';
 import type { TabDebuggerManager } from './debugger-mgr';
 
 export interface ScriptInjectorOptions {
@@ -253,6 +253,28 @@ export class ScriptInjector {
   private onTabsUpdatedBound = this.handleTabsUpdated.bind(this);
   private onTabRemovedBound = this.handleTabRemoved.bind(this);
 
+  // In-memory script and settings caches
+  private cachedSettings: AppSettings | null = null;
+  private cachedScripts: ScriptRecord[] | null = null;
+  private unsubscribeScripts?: () => void;
+  private isStorageListening = false;
+  private storageOnChangedBound = this.handleStorageChanged.bind(this);
+
+  private handleStorageChanged(
+    changes: Record<string, chrome.storage.StorageChange>,
+    areaName: string
+  ): void {
+    if (areaName === 'local') {
+      if (changes.settings) {
+        this.cachedSettings = changes.settings.newValue ? { ...changes.settings.newValue } : null;
+      }
+      if (changes.scripts) {
+        const scriptsObj = changes.scripts.newValue || {};
+        this.cachedScripts = Object.values(scriptsObj);
+      }
+    }
+  }
+
   constructor(options: ScriptInjectorOptions = {}) {
     this.debuggerManager = options.debuggerManager;
     this.channelId = options.channelId;
@@ -286,7 +308,25 @@ export class ScriptInjector {
         chrome.tabs.onUpdated?.addListener?.(this.onTabsUpdatedBound);
         chrome.tabs.onRemoved?.addListener?.(this.onTabRemovedBound);
       }
+
+      if (!this.isStorageListening && chrome.storage?.onChanged) {
+        chrome.storage.onChanged.addListener(this.storageOnChangedBound);
+        this.isStorageListening = true;
+      }
     }
+
+    if (!this.unsubscribeScripts) {
+      this.unsubscribeScripts = onScriptsChanged((scripts) => {
+        this.cachedScripts = Object.values(scripts);
+      });
+    }
+
+    getSettings().then((s) => {
+      if (this.cachedSettings === null) this.cachedSettings = s;
+    }).catch(() => {});
+    getScriptList().then((list) => {
+      if (this.cachedScripts === null) this.cachedScripts = list;
+    }).catch(() => {});
 
     this.isListening = true;
   }
@@ -302,14 +342,23 @@ export class ScriptInjector {
         scriptSet.clear();
         frameMap.delete(frameId);
       }
+      if (frameMap.size === 0) {
+        this.injectionHistory.delete(tabId);
+      }
     }
     const frameUrlMap = this.frameUrls.get(tabId);
     if (frameUrlMap) {
       frameUrlMap.delete(frameId);
+      if (frameUrlMap.size === 0) {
+        this.frameUrls.delete(tabId);
+      }
     }
     const frameDocMap = this.frameDocumentIds.get(tabId);
     if (frameDocMap) {
       frameDocMap.delete(frameId);
+      if (frameDocMap.size === 0) {
+        this.frameDocumentIds.delete(tabId);
+      }
     }
   }
 
@@ -354,7 +403,20 @@ export class ScriptInjector {
         chrome.tabs.onUpdated?.removeListener?.(this.onTabsUpdatedBound);
         chrome.tabs.onRemoved?.removeListener?.(this.onTabRemovedBound);
       }
+
+      if (this.isStorageListening && chrome.storage?.onChanged) {
+        chrome.storage.onChanged.removeListener(this.storageOnChangedBound);
+        this.isStorageListening = false;
+      }
     }
+
+    if (this.unsubscribeScripts) {
+      this.unsubscribeScripts();
+      this.unsubscribeScripts = undefined;
+    }
+
+    this.cachedSettings = null;
+    this.cachedScripts = null;
 
     // Cleanly deallocate all nested maps and sets
     for (const frameMap of this.injectionHistory.values()) {
@@ -536,6 +598,7 @@ export class ScriptInjector {
     this.tabDocumentIds.delete(tabId);
     this.frameUrls.delete(tabId);
     this.frameDocumentIds.delete(tabId);
+    this.injectionHistory.delete(tabId);
   }
 
   // -------------------------------------------------------------------------
@@ -544,6 +607,7 @@ export class ScriptInjector {
 
   /**
    * Queries storage for enabled scripts matching target URL, timing tier, and frame.
+   * Utilizes in-memory caching to eliminate redundant storage reads and cloning on multi-frame navigations.
    */
   public async getMatchingScripts(
     url: string,
@@ -554,12 +618,29 @@ export class ScriptInjector {
       return [];
     }
 
-    const settings = await getSettings();
-    if (!settings.globalEnabled) {
+    if (!this.isStorageListening && typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
+      chrome.storage.onChanged.addListener(this.storageOnChangedBound);
+      this.isStorageListening = true;
+    }
+
+    if (!this.unsubscribeScripts) {
+      this.unsubscribeScripts = onScriptsChanged((scripts) => {
+        this.cachedScripts = Object.values(scripts);
+      });
+    }
+
+    if (!this.cachedSettings) {
+      this.cachedSettings = await getSettings();
+    }
+    if (!this.cachedSettings.globalEnabled) {
       return [];
     }
 
-    const allScripts = await getScriptList();
+    if (!this.cachedScripts) {
+      this.cachedScripts = await getScriptList();
+    }
+
+    const allScripts = this.cachedScripts;
 
     return allScripts.filter((script) => {
       if (!script.enabled) return false;

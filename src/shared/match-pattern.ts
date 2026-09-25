@@ -60,29 +60,48 @@ export function normalizeUrl(url: string): string {
   }
 }
 
+export const MAX_MATCH_PATTERN_CACHE_SIZE = 1000;
+const patternCache = new Map<string, RegExp>();
+
+/**
+ * Clears the compiled match pattern cache. Useful for test isolation.
+ */
+export function clearMatchPatternCache(): void {
+  patternCache.clear();
+}
+
 /**
  * Compiles a Chromium match pattern into a RegExp.
  * Throws an Error if the pattern violates Chromium match pattern syntax.
+ * Results are cached in a bounded Map (max 1000 entries) with LRU eviction.
  */
 export function compileMatchPattern(pattern: string): RegExp {
   if (typeof pattern !== 'string') {
     throw new Error('Match pattern must be a string');
   }
 
+  const cached = patternCache.get(pattern);
+  if (cached) {
+    // Refresh LRU order: delete and re-insert
+    patternCache.delete(pattern);
+    patternCache.set(pattern, cached);
+    return cached;
+  }
+
   const trimmed = pattern.trim();
 
+  let compiled: RegExp;
   if (trimmed === '<all_urls>') {
-    return /^(?:https?|file):\/\/.+$/;
-  }
-
-  // Strict structural pattern: <scheme>://<host><path>
-  // In Manifest V3 userscripts, valid schemes are *, http, https, file (ftp is disallowed)
-  const match = trimmed.match(/^(\*|https?|file):\/\/([^\/]*?)(\/.*)$/);
-  if (!match) {
-    throw new Error(
-      `Invalid match pattern syntax: "${pattern}". Expected "<scheme>://<host><path>" or "<all_urls>"`
-    );
-  }
+    compiled = /^(?:https?|file):\/\/.+$/;
+  } else {
+    // Strict structural pattern: <scheme>://<host><path>
+    // In Manifest V3 userscripts, valid schemes are *, http, https, file (ftp is disallowed)
+    const match = trimmed.match(/^(\*|https?|file):\/\/([^\/]*?)(\/.*)$/);
+    if (!match) {
+      throw new Error(
+        `Invalid match pattern syntax: "${pattern}". Expected "<scheme>://<host><path>" or "<all_urls>"`
+      );
+    }
 
   const [, scheme, rawHostWithPort, path] = match;
 
@@ -199,7 +218,18 @@ export function compileMatchPattern(pattern: string): RegExp {
   const escapedParts = pathParts.map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'));
   const pathRegex = escapedParts.join('.*');
 
-  return new RegExp(`^${schemeRegex}:\\/\\/${hostRegex}${pathRegex}$`);
+    compiled = new RegExp(`^${schemeRegex}:\\/\\/${hostRegex}${pathRegex}$`);
+  }
+
+  if (patternCache.size >= MAX_MATCH_PATTERN_CACHE_SIZE) {
+    const oldestKey = patternCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      patternCache.delete(oldestKey);
+    }
+  }
+  patternCache.set(pattern, compiled);
+
+  return compiled;
 }
 
 /**

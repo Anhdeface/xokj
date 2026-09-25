@@ -22,8 +22,18 @@ export default defineConfig({
     }
   },
   build: {
+    target: 'es2022',
     emptyOutDir: true,
     outDir: 'dist',
-    chunkSizeWarningLimit: 1000
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/@codemirror') || id.includes('node_modules/codemirror')) {
+            return 'codemirror';
+          }
+        }
+      }
+    }
   }
 });
