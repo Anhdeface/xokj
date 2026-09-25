@@ -1,11 +1,8 @@
 /**
  * XOKJ - Shared Domain Types & Interface Contracts
- * Authoritative reference for Milestone 1 - Milestone 5
  */
 
-// ---------------------------------------------------------------------------
 // 1. Userscript Metadata & Directive Types
-// ---------------------------------------------------------------------------
 
 /**
  * Execution timings conforming to Tampermonkey/Violentmonkey specifications.
@@ -103,9 +100,7 @@ export type ParseMetadataResult = ParsedMetadata & {
   errors: string[];
 };
 
-// ---------------------------------------------------------------------------
 // 2. Script Persistence & Record Types (Storage)
-// ---------------------------------------------------------------------------
 
 /**
  * Stored script item persisted in chrome.storage.local.
@@ -143,9 +138,7 @@ export interface ScriptFilter {
   domain?: string;
 }
 
-// ---------------------------------------------------------------------------
 // 3. Chrome DevTools Protocol (CDP) RPC Message Protocol
-// ---------------------------------------------------------------------------
 
 /**
  * Asynchronous RPC invocation sent from Userscript/Content Script to Background Service Worker.
@@ -247,9 +240,7 @@ export interface CdpRpcLifecycleMessage {
   reason?: string;
 }
 
-// ---------------------------------------------------------------------------
 // 4. Tab & Debugger Session State Machine
-// ---------------------------------------------------------------------------
 
 export type DebuggerSessionStatus = 'IDLE' | 'ATTACHING' | 'ATTACHED' | 'CONFLICT' | 'DETACHED';
 
@@ -282,9 +273,7 @@ export interface ConflictEvent {
   timestamp: number;
 }
 
-// ---------------------------------------------------------------------------
 // 5. Extension Storage Schema & Application Settings
-// ---------------------------------------------------------------------------
 
 export interface AppSettings {
   globalEnabled: boolean;
@@ -300,9 +289,7 @@ export interface ExtensionStorageSchema {
   tab_sessions?: Record<number, TabSessionState>;
 }
 
-// ---------------------------------------------------------------------------
 // 6. Extension Internal Messaging (Background ↔ Popup / Dashboard)
-// ---------------------------------------------------------------------------
 
 export interface GetActiveScriptsMessage {
   type: 'GET_ACTIVE_SCRIPTS_FOR_TAB';
@@ -383,9 +370,7 @@ export type ExtensionMessage =
   | CdpRpcEventMessage
   | CdpRpcLifecycleMessage;
 
-// ---------------------------------------------------------------------------
 // 7. Userscript Runtime SDK Interface
-// ---------------------------------------------------------------------------
 
 export type CdpClientStatus = 'ATTACHED' | 'CONFLICT' | 'DETACHED' | 'IDLE';
 
@@ -416,9 +401,7 @@ export interface CdpClient {
   getStatus(): Promise<CdpClientStatus>;
 }
 
-// ---------------------------------------------------------------------------
 // 8. Custom Error Classes
-// ---------------------------------------------------------------------------
 
 /**
  * Thrown or rejected when a CDP operation fails due to native DevTools conflict.

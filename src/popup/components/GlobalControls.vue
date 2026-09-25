@@ -85,7 +85,6 @@ defineEmits<{
   color: #f87171;
 }
 
-/* Compact smooth switch */
 .toggle-switch {
   position: relative;
   display: inline-block;

@@ -1,6 +1,5 @@
 <template>
   <div class="dashboard-root">
-    <!-- Header -->
     <DashboardHeader
       :scripts-count="scriptList.length"
       :cdp-scripts-count="cdpScriptsCount"
@@ -10,9 +9,7 @@
       @reset-defaults="showResetConfirm = true"
     />
 
-    <!-- Main Master-Detail Layout -->
     <main class="dashboard-body">
-      <!-- Left Sidebar (Master) -->
       <aside class="sidebar-pane">
         <ScriptList
           :scripts="filteredScripts"
@@ -27,10 +24,8 @@
         />
       </aside>
 
-      <!-- Right Main Panel (Detail / Editor) -->
       <section class="detail-pane">
         <template v-if="selectedScript">
-          <!-- Editor Toolbar -->
           <div class="editor-header-bar">
             <div class="script-title-area">
               <span class="script-name">{{ selectedScript.name }}</span>
@@ -90,13 +85,11 @@
             </div>
           </div>
 
-          <!-- Metadata & Directive Inspector -->
           <ScriptMetadataInspector
             :metadata="selectedScript.metadata"
             :parse-errors="selectedScript.parseErrors"
           />
 
-          <!-- CodeMirror 6 Editor Container -->
           <div class="editor-viewport">
             <ScriptEditor
               v-model="draftCode"
@@ -119,7 +112,6 @@
       </section>
     </main>
 
-    <!-- Hidden File Input for Import -->
     <input
       type="file"
       ref="fileInputRef"
@@ -128,7 +120,6 @@
       @change="onFileSelected"
     />
 
-    <!-- Confirm Modals -->
     <ConfirmModal
       v-if="showDeleteConfirm"
       title="Delete Script"
@@ -159,7 +150,6 @@
       @cancel="cancelDiscard"
     />
 
-    <!-- Toast Notifications -->
     <ToastNotification
       v-if="toast"
       :type="toast.type"
@@ -189,14 +179,12 @@ import ScriptMetadataInspector from './components/ScriptMetadataInspector.vue';
 import ConfirmModal from './components/ConfirmModal.vue';
 import ToastNotification from './components/ToastNotification.vue';
 
-// State
 const scripts = ref<Record<string, ScriptRecord>>({});
 const selectedScriptId = ref<string | null>(null);
 const draftCode = ref<string>('');
 const searchQuery = ref<string>('');
 const activeFilter = ref<'all' | 'enabled' | 'disabled' | 'cdp'>('all');
 
-// Modals & UI helpers
 const showDeleteConfirm = ref(false);
 const showResetConfirm = ref(false);
 const showDiscardConfirm = ref(false);
@@ -213,7 +201,6 @@ function showToast(message: string, type: 'success' | 'info' | 'error' = 'succes
   }, 3000);
 }
 
-// Computeds
 const scriptList = computed(() => Object.values(scripts.value));
 const selectedScript = computed(() => {
   if (!selectedScriptId.value) return null;
@@ -261,7 +248,6 @@ const filteredScripts = computed(() => {
   });
 });
 
-// Selection & Navigation
 function handleSelectScript(id: string) {
   if (id === selectedScriptId.value) return;
   if (isDirty.value) {
@@ -291,7 +277,6 @@ function cancelDiscard() {
   pendingSwitchId.value = null;
 }
 
-// CRUD Operations
 async function handleCreateNewScript() {
   if (isDirty.value) {
     const shouldProceed = window.confirm(
@@ -383,7 +368,6 @@ async function handleToggleCurrentScript() {
   await handleToggleScript(selectedScript.value.id);
 }
 
-// Import / Export / Reset
 async function handleExportAll() {
   const jsonStr = await exportScripts();
   downloadJson(jsonStr, `xokj-scripts-${new Date().toISOString().slice(0, 10)}.json`);
@@ -435,7 +419,6 @@ async function onFileSelected(e: Event) {
         return;
       }
 
-      // Refresh scripts
       scripts.value = await getScripts();
       if (res.scripts && res.scripts.length > 0) {
         selectScript(res.scripts[0].id);
@@ -462,7 +445,6 @@ async function confirmResetDefaults() {
   showToast('Reset scripts to defaults');
 }
 
-// Lifecycle
 onMounted(async () => {
   scripts.value = await getScripts();
   const keys = Object.keys(scripts.value);
@@ -496,7 +478,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style>
-/* Base styling */
 html, body {
   margin: 0;
   padding: 0;
@@ -507,7 +488,6 @@ html, body {
   overflow: hidden;
 }
 
-/* Sleek custom scrollbars */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;

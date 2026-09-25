@@ -1,6 +1,5 @@
 /**
  * XOKJ - DevTools Conflict Management & Reconnection Subsystem
- * Location: src/background/conflict-mgr.ts
  */
 
 import type {
@@ -139,20 +138,18 @@ export class DevToolsConflictHandler {
         : `CDP session detached: ${reason}`
     );
 
-    // 1. Instantly reject all inflight command promises for that tabId with code 1001
+    // Reject all inflight command promises for this tab
     if (this.inflightTracker) {
       this.inflightTracker.rejectInflightForTab(tabId, conflictError);
     }
 
-    // 2. Update memory state in TabDebuggerManager
+    // Update memory state
     if (this.debuggerController) {
       this.debuggerController.setTabStatus(tabId, targetStatus, reason);
     }
 
-    // 3. Persist tab state to storage
+    // Persist and broadcast
     await this.persistTabState(tabId, targetStatus, reason);
-
-    // 4. Broadcast CdpRpcLifecycleMessage to content script and popup
     await this.broadcastLifecycle(tabId, targetStatus, reason);
   }
 

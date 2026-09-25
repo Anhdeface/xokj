@@ -94,7 +94,6 @@ const badgeTooltip = computed(() => {
   position: relative;
 }
 
-/* ATTACHED: Emerald */
 .status-attached {
   background: rgba(16, 185, 129, 0.12);
   border-color: rgba(16, 185, 129, 0.4);
@@ -107,7 +106,6 @@ const badgeTooltip = computed(() => {
   animation: pulse-dot 2s infinite ease-in-out;
 }
 
-/* ATTACHING: Amber */
 .status-attaching {
   background: rgba(245, 158, 11, 0.12);
   border-color: rgba(245, 158, 11, 0.4);
@@ -119,7 +117,6 @@ const badgeTooltip = computed(() => {
   animation: blink-dot 1s infinite ease-in-out;
 }
 
-/* CONFLICT: Rose / Ruby */
 .status-conflict {
   background: rgba(239, 68, 68, 0.14);
   border-color: rgba(239, 68, 68, 0.5);
@@ -131,7 +128,6 @@ const badgeTooltip = computed(() => {
   box-shadow: 0 0 8px rgba(239, 68, 68, 0.8);
 }
 
-/* IDLE & DETACHED: Slate */
 .status-idle,
 .status-detached {
   background: rgba(100, 116, 139, 0.1);

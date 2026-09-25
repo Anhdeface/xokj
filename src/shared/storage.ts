@@ -203,7 +203,6 @@ export function deepFreeze<T extends object>(obj: T): Readonly<T> {
   return obj;
 }
 
-// Freeze defaults at module load to prevent in-memory mutation
 deepFreeze(DEFAULT_SETTINGS);
 deepFreeze(DEFAULT_SCRIPTS);
 
@@ -634,7 +633,7 @@ export async function importScripts(
 
         const itemToSave = { ...raw };
         if (exists && !options.overwrite) {
-          itemToSave.id = undefined; // Generate new ID
+          itemToSave.id = undefined;
         }
 
         if (options.autoEnable !== undefined) {

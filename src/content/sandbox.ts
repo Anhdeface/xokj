@@ -1,6 +1,5 @@
 /**
  * XOKJ - Userscript Execution Sandbox & Lifecycle Timing Engine
- * Location: src/content/sandbox.ts
  *
  * Provides isolated execution wrapper, `@grant` scope construction,
  * source map generation (`//# sourceURL`), and `@run-at` timing scheduling.

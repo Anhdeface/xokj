@@ -11,31 +11,26 @@ import { UiIpcServer } from './ui-ipc';
 
 console.log('[XOKJ Background] Initializing service worker subsystems...');
 
-// 1. Initialize core debugger manager
 export const debuggerMgr = new TabDebuggerManager();
 
-// 2. Initialize CDP bridge server with debugger delegate
 export const cdpBridge = new CdpBridgeServer({
   debuggerManager: debuggerMgr,
   autoAttach: true
 });
 
-// Complete single-owner detach architecture: route detach command rejection to bridge
+// Route detach command rejection to bridge (single-owner detach architecture)
 debuggerMgr.setInflightTracker(cdpBridge);
 
-// 3. Initialize DevTools conflict handler wired to bridge and debugger manager
 export const conflictHandler = new DevToolsConflictHandler(cdpBridge, debuggerMgr);
 
-// 4. Initialize script injector wired to debugger manager
 export const scriptInjector = new ScriptInjector({
   debuggerManager: debuggerMgr,
   autoStart: true
 });
 
-// 5. Initialize UI IPC server wired to debugger manager
 export const uiIpcServer = new UiIpcServer(debuggerMgr);
 
-// 6. Start all services synchronously to guarantee MV3 listener registration in the initial turn
+// Start all services synchronously to guarantee MV3 listener registration in the initial turn
 function initSubsystems(): void {
   try {
     cdpBridge.init();
@@ -45,7 +40,7 @@ function initSubsystems(): void {
     debuggerMgr.init().catch((err) => {
       console.error('[XOKJ Background] debuggerMgr.init failed:', err);
     });
-    console.log('[XOKJ Background] All CDP, conflict, injector, and UI-IPC subsystems successfully initialized');
+    console.log('[XOKJ Background] All subsystems initialized');
   } catch (err) {
     console.error('[XOKJ Background] Failed to initialize subsystems:', err);
   }

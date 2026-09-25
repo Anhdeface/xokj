@@ -35,7 +35,7 @@ const saveKeymap = keymap.of([
     key: 'Mod-s',
     run: () => {
       emit('save');
-      return true; // Prevent default browser "Save Webpage" dialog
+      return true;
     }
   }
 ]);

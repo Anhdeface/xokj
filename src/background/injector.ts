@@ -1,6 +1,5 @@
 /**
  * XOKJ - Script Injection Orchestrator
- * Location: src/background/injector.ts
  *
  * Coordinates userscript injection based on Chromium navigation hooks,
  * match patterns, @run-at timing stages, and early CDP domain sync.
@@ -117,8 +116,7 @@ export function pageSandboxRunner(
 
     let cdp: any = undefined;
     if (allowCdp) {
-      // Feature 17: Strictly construct self-contained CDP client inside execution closure.
-      // Host page globals (window.cdp, window.__xokj_cdp, window.GM_cdp) are strictly ignored to prevent hijacking.
+      // Construct self-contained CDP client inside execution closure to prevent scope hijacking.
       cdp = {
         send: (method: string, params?: Record<string, unknown>): Promise<any> => {
           return new Promise((resolve, reject) => {
@@ -231,8 +229,7 @@ export class ScriptInjector {
   private channelId?: string;
   private isListening = false;
 
-  // Feature 11: Two-level nested injection deduplication map:
-  // tabId -> frameId -> Set of `${scriptId}:${stage}`
+  // Nested injection deduplication map: tabId -> frameId -> Set of `${scriptId}:${stage}`
   private injectionHistory = new Map<number, Map<number, Set<string>>>();
 
   // Navigation tracker: tabId -> current navigation URL
@@ -332,7 +329,7 @@ export class ScriptInjector {
   }
 
   /**
-   * Clears injection history for a specific frame (Feature 11).
+   * Clears injection history for a specific frame.
    */
   public clearFrameHistory(tabId: number, frameId: number): void {
     const frameMap = this.injectionHistory.get(tabId);
@@ -443,9 +440,7 @@ export class ScriptInjector {
     this.debuggerManager = debuggerManager;
   }
 
-  // -------------------------------------------------------------------------
   // Navigation Lifecycle Handlers
-  // -------------------------------------------------------------------------
 
   /**
    * Triggers @run-at 'document-start' injection.
@@ -460,13 +455,13 @@ export class ScriptInjector {
       const currentUrl = this.tabUrls.get(tabId);
       const currentDocId = this.tabDocumentIds.get(tabId);
 
-      // Feature 12: Same-URL Link Navigation Reset with Duplicate Event Protection
+      // Same-URL link navigation reset with duplicate event protection:
       // If documentId is present:
       //   - Different documentId -> new document context -> reset history
       //   - Same documentId -> duplicate event delivery -> preserve history
       // If documentId is absent (legacy tests / mocks):
       //   - URL change or reload -> reset history
-      //   - If URL and transitionType are identical without documentId, preserve history (prevents duplicate injection in T4.1 / T4.4)
+      //   - If URL and transitionType are identical without documentId, preserve history
       const hasDocId = typeof documentId === 'string' && documentId.length > 0;
       const isNewDoc = hasDocId
         ? documentId !== currentDocId
@@ -601,9 +596,7 @@ export class ScriptInjector {
     this.injectionHistory.delete(tabId);
   }
 
-  // -------------------------------------------------------------------------
   // Matching & Injection Engine
-  // -------------------------------------------------------------------------
 
   /**
    * Queries storage for enabled scripts matching target URL, timing tier, and frame.
@@ -696,7 +689,7 @@ export class ScriptInjector {
     // If main frame navigated to a different URL while awaiting, abort stale execution
     if (frameId === 0 && this.tabUrls.get(tabId) !== url) return;
 
-    // Feature 13: Ensure CDP readiness across ALL stages (document-start, document-end, document-idle)
+    // Ensure CDP readiness across all execution stages (document-start, document-end, document-idle)
     await this.ensureCdpReadyForScripts(tabId, url, matchingScripts);
 
     // If tab was removed while awaiting CDP readiness, abort immediately
@@ -746,7 +739,7 @@ export class ScriptInjector {
         break;
       }
 
-      // Feature 14: Rollback reservation if execution failed
+      // Rollback reservation if execution failed
       if (!success) {
         frameHistory.delete(dedupeKey);
       }

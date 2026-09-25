@@ -247,7 +247,6 @@ const grantsLabel = computed(() => {
   border-color: rgba(99, 102, 241, 0.4);
 }
 
-/* Item switch */
 .item-switch {
   position: relative;
   display: inline-block;

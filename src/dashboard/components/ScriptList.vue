@@ -1,6 +1,5 @@
 <template>
   <div class="script-list-container">
-    <!-- Filter Tabs -->
     <div class="filter-tabs">
       <button
         class="tab-btn"
@@ -33,7 +32,6 @@
       </button>
     </div>
 
-    <!-- Search Box -->
     <div class="search-box">
       <i class="fa-solid fa-magnifying-glass search-icon"></i>
       <input
@@ -52,7 +50,6 @@
       </button>
     </div>
 
-    <!-- Script Items Scroll -->
     <div class="script-items-scroll">
       <div v-if="scripts.length === 0" class="empty-list-notice">
         <div class="notice-icon-wrap">
@@ -249,7 +246,6 @@ defineEmits<{
   color: #94a3b8;
 }
 
-/* Animations */
 .list-anim-enter-active,
 .list-anim-leave-active {
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);

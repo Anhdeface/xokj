@@ -216,7 +216,6 @@ const primaryMatch = computed(() => {
   text-overflow: ellipsis;
 }
 
-/* Custom switch */
 .item-switch {
   position: relative;
   display: inline-block;

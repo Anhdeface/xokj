@@ -40,13 +40,11 @@ export function usePopupState() {
     }
   }
 
-  // Reactive matching scripts computed from in-memory scripts list
   const matchingScripts = computed<ScriptRecord[]>(() => {
     const url = tabInfo.value.url;
     if (!url || tabInfo.value.isRestricted) return [];
 
     return scripts.value.filter((script) => {
-      // Exclusions take precedence
       if (matchesAny(script.metadata?.excludes || [], url)) return false;
 
       const patterns = script.metadata?.matches?.length
@@ -129,9 +127,7 @@ export function usePopupState() {
         cdpStatus.value = response.cdpStatus;
         conflictReason.value = response.conflictReason;
       }
-    } catch {
-      // Ignore IPC fallback errors
-    }
+    } catch {}
   }
 
   function handleRuntimeMessage(message: any): void {

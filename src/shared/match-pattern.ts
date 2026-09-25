@@ -29,7 +29,6 @@ export function isRestrictedUrl(url: string): boolean {
     if (RESTRICTED_SCHEMES.includes(parsed.protocol)) {
       return true;
     }
-    // Block Chrome Web Store
     if (
       parsed.hostname === 'chromewebstore.google.com' ||
       (parsed.hostname === 'chrome.google.com' && parsed.pathname.startsWith('/webstore'))
@@ -38,12 +37,11 @@ export function isRestrictedUrl(url: string): boolean {
     }
     return false;
   } catch {
-    // If URL parsing fails, check raw string prefix
     const lower = url.toLowerCase().trim();
     for (const scheme of RESTRICTED_SCHEMES) {
       if (lower.startsWith(scheme)) return true;
     }
-    return true; // Malformed URLs are restricted
+    return true;
   }
 }
 
@@ -105,7 +103,6 @@ export function compileMatchPattern(pattern: string): RegExp {
 
   const [, scheme, rawHostWithPort, path] = match;
 
-  // 1. Scheme compilation
   let schemeRegex = '';
   if (scheme === '*') {
     // Wildcard scheme matches ONLY http or https in Chromium
@@ -116,10 +113,8 @@ export function compileMatchPattern(pattern: string): RegExp {
     throw new Error(`Invalid scheme in match pattern: "${scheme}"`);
   }
 
-  // 2. Host compilation
   let hostRegex = '';
   if (scheme === 'file') {
-    // For file:///, host MUST be empty
     if (rawHostWithPort !== '') {
       throw new Error(`File scheme match pattern host must be empty (e.g. file:///path), got "${rawHostWithPort}"`);
     }
@@ -133,7 +128,6 @@ export function compileMatchPattern(pattern: string): RegExp {
     let host = hostWithPort;
     let port = '';
 
-    // Handle IPv6 literal bracket notation: [::1] or [::1]:8080
     if (hostWithPort.startsWith('[')) {
       const closeBracketIdx = hostWithPort.indexOf(']');
       if (closeBracketIdx === -1) {
@@ -175,7 +169,6 @@ export function compileMatchPattern(pattern: string): RegExp {
     }
 
     if (host === '*') {
-      // Universal host wildcard matches DNS/IPv4 hostnames and bracketed IPv6 literals
       hostRegex = '(?:\\[[^\\]]+\\]|[^/:]+)';
     } else if (host.startsWith('*.')) {
       const rootDomain = host.slice(2);
@@ -183,7 +176,6 @@ export function compileMatchPattern(pattern: string): RegExp {
         throw new Error(`Invalid host wildcard in match pattern: "${host}"`);
       }
       const escapedRoot = rootDomain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      // *.example.com matches example.com AND any.subdomain.example.com
       hostRegex = `(?:[^/:]+\\.)?${escapedRoot}`;
     } else {
       if (host.includes('*')) {
@@ -192,7 +184,6 @@ export function compileMatchPattern(pattern: string): RegExp {
       hostRegex = host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 
-    // Optional port matching
     if (port) {
       if (port === '*') {
         hostRegex += '(?::\\d+)?';
@@ -200,20 +191,16 @@ export function compileMatchPattern(pattern: string): RegExp {
         hostRegex += `:${port}`;
       }
     } else {
-      // If pattern specifies no port, allow optional port on tested URL
       hostRegex += '(?::\\d+)?';
     }
   }
 
-  // 3. Path compilation
   if (!path.startsWith('/')) {
     throw new Error(`Path must start with '/': "${path}"`);
   }
 
-  // Collapse redundant path wildcards to prevent catastrophic ReDoS (/*/*/*/*/* -> /*, *** -> *)
   const normalizedPath = path.replace(/\*+/g, '*').replace(/(?:\/\*)+/g, '/*');
 
-  // Path wildcards: replace * with .* while escaping regex special characters
   const pathParts = normalizedPath.split('*');
   const escapedParts = pathParts.map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'));
   const pathRegex = escapedParts.join('.*');
@@ -290,9 +277,7 @@ export function matchesAny(patterns: string[], url: string): boolean {
       if (re.test(normalized)) {
         return true;
       }
-    } catch {
-      // Malformed pattern in array is ignored
-    }
+    } catch {}
   }
 
   return false;

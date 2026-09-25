@@ -1,6 +1,5 @@
 /**
  * XOKJ - Content Script Message Bridge
- * Location: src/content/bridge.ts
  *
  * Multiplexes communication between webpage/userscript context and background service worker.
  * Handles request correlation, 30s timeout, event relay, and DevTools conflict invalidation.

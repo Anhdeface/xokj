@@ -1,6 +1,5 @@
 <template>
   <div class="metadata-inspector">
-    <!-- Parse Errors Banner -->
     <div v-if="parseErrors && parseErrors.length > 0" class="parse-errors-banner">
       <i class="fa-solid fa-triangle-exclamation warning-icon"></i>
       <div class="errors-content">
@@ -11,7 +10,6 @@
       </div>
     </div>
 
-    <!-- Metadata Attributes Bar -->
     <div class="metadata-attributes">
       <div class="attr-group">
         <span class="attr-label">

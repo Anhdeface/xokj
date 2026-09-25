@@ -1,6 +1,5 @@
 /**
  * XOKJ - Userscript CDP SDK & Greasemonkey Compatibility Layer
- * Location: src/content/cdp-sdk.ts
  *
  * Implements client-side `cdp` object, GM_cdp alias, and standard GM_* API grants.
  */

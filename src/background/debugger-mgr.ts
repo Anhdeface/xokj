@@ -1,6 +1,5 @@
 /**
  * XOKJ - Chrome Debugger Session Manager & Declarative Early Init
- * Authoritative implementation for Milestone 2
  */
 
 import {
@@ -166,15 +165,7 @@ export class TabDebuggerManager {
 
   /**
    * Attaches debugger to tab with re-entrancy protection, throwing on error.
-   * If session is in CONFLICT status and force !== true, immediately rejects with
-   * DevToolsConflictError (code 1001) to prevent auto-attach loops while DevTools is open.
-   *
-   * Flexible argument signatures:
-   *   - attachTab(tabId)
-   *   - attachTab(tabId, protocolVersion) [e.g. attachTab(42, '1.3')]
-   *   - attachTab(tabId, url, force, protocolVersion)
-   *   - attachTab(tabId, force) [e.g. attachTab(42, true)]
-   *   - attachTab(tabId, undefined, force) [e.g. attachTab(42, undefined, true)]
+   * If session is in CONFLICT status and force !== true, rejects with DevToolsConflictError (code 1001).
    */
   async attachTab(
     tabId: number,
@@ -186,7 +177,6 @@ export class TabDebuggerManager {
     let actualForce = false;
     let actualVersion = protocolVersion;
 
-    // Disambiguate arguments
     if (typeof urlOrVersionOrForce === 'boolean') {
       actualForce = urlOrVersionOrForce;
       if (typeof forceOrProtocol === 'string') {
@@ -219,12 +209,10 @@ export class TabDebuggerManager {
       session = this.createSession(tabId);
     }
 
-    // 1. Fast check if already attached and no operation in flight
     if (session.status === 'ATTACHED' && !session.operationLock) {
       return;
     }
 
-    // 2. CONFLICT Guard: If in CONFLICT and not explicit force/reconnect, fast-reject with 1001
     if (session.status === 'CONFLICT' && !session.operationLock && !actualForce) {
       throw new DevToolsConflictError(
         tabId,
@@ -233,7 +221,6 @@ export class TabDebuggerManager {
       );
     }
 
-    // 3. Coalesce with ongoing attachTab call ONLY IF already ATTACHING, attach is current op, and not a forced attach
     if (
       session.status === 'ATTACHING' &&
       session.currentOp === 'attach' &&
@@ -246,7 +233,6 @@ export class TabDebuggerManager {
       }
     }
 
-    // 4. Chain onto operationLock in FIFO order to prevent race conditions & execution order inversion
     const prevLock = session.operationLock;
     let releaseLock!: () => void;
     const attachLock = new Promise<void>((resolve) => {
@@ -259,12 +245,9 @@ export class TabDebuggerManager {
       if (prevLock) {
         try {
           await prevLock;
-        } catch {
-          // Rejection in prior operation should not prevent next operation
-        }
+        } catch {}
       }
 
-      // Re-check state after prior lock settles
       if ((session.status as DebuggerSessionStatus) === 'ATTACHED') {
         return;
       }
@@ -287,9 +270,7 @@ export class TabDebuggerManager {
               targetUrl = tab.url;
               session.targetUrl = targetUrl;
             }
-          } catch {
-            // Ignore
-          }
+          } catch {}
         }
 
         if (targetUrl && !isAttachableTarget(targetUrl)) {
@@ -307,15 +288,12 @@ export class TabDebuggerManager {
 
           await chrome.debugger.attach({ tabId }, actualVersion);
 
-          // Closed tab guard: verify tab was not removed or detached while attach was suspended
           if (!this.sessions.has(tabId) || session.status === 'DETACHED') {
             try {
               if (typeof chrome !== 'undefined' && chrome.debugger) {
                 await chrome.debugger.detach({ tabId });
               }
-            } catch {
-              // Benign
-            }
+            } catch {}
             return;
           }
 
@@ -379,22 +357,17 @@ export class TabDebuggerManager {
     const session = this.sessions.get(tabId);
     if (!session) return;
 
-    // Fast check: already detached and no operation in flight
     if (session.status === 'DETACHED' && !session.operationLock) {
       return;
     }
 
-    // If another detach is already in progress, coalesce onto it
     if (session.operationLock && session.currentOp === 'detach') {
       try {
         await session.operationLock;
-      } catch {
-        // Non-fatal
-      }
+      } catch {}
       return;
     }
 
-    // Chain onto operationLock in FIFO order
     const prevLock = session.operationLock;
     let releaseLock!: () => void;
     const detachLock = new Promise<void>((resolve) => {
@@ -407,12 +380,9 @@ export class TabDebuggerManager {
       if (prevLock) {
         try {
           await prevLock;
-        } catch {
-          // Non-fatal: even if attach failed, detach cleanup must proceed
-        }
+        } catch {}
       }
 
-      // Re-check: if already detached after prior lock settles, return without duplicate detach call
       if (session.status === 'DETACHED') {
         return;
       }
@@ -422,15 +392,12 @@ export class TabDebuggerManager {
           if (typeof chrome !== 'undefined' && chrome.debugger) {
             await chrome.debugger.detach({ tabId });
           }
-        } catch {
-          // Benign if tab already detached or closed
-        } finally {
+        } catch {} finally {
           session.status = 'DETACHED';
           session.attached = false;
           session.activeDomains.clear();
           session.updatedAt = Date.now();
 
-          // Programmatic detach rejection: cleanly reject pending inflight requests immediately
           if (this.inflightTracker) {
             const error = {
               code: 1002,
@@ -517,9 +484,7 @@ export class TabDebuggerManager {
           url = tab.url;
           session.targetUrl = url;
         }
-      } catch {
-        // Tab query failure is non-fatal
-      }
+      } catch {}
     }
 
     if (url && isAttachableTarget(url)) {
@@ -638,7 +603,6 @@ export class TabDebuggerManager {
 
     const isConflict = reason === 'canceled_by_user' || reason === 'replaced_with_devtools';
 
-    // 1. Instantly reject inflight CDP commands for this tab
     if (this.inflightTracker) {
       const error = isConflict
         ? {
@@ -703,9 +667,7 @@ export class TabDebuggerManager {
               await chrome.storage.local.set({ tab_sessions: updated });
             }
           });
-        } catch {
-          // Non-fatal
-        }
+        } catch {}
       }
     }
   }
@@ -728,9 +690,7 @@ export class TabDebuggerManager {
           session.updatedAt = Date.now();
         }
       }
-    } catch {
-      // Ignored
-    }
+    } catch {}
   }
 
   /**
@@ -759,9 +719,7 @@ export class TabDebuggerManager {
           await chrome.storage.session.set({
             [`tab_session_${session.tabId}`]: snapshot
           });
-        } catch {
-          // Fallback
-        }
+        } catch {}
       }
 
       if (chrome.storage?.local?.get && chrome.storage?.local?.set) {
@@ -773,9 +731,7 @@ export class TabDebuggerManager {
             sessions[session.tabId] = snapshot;
             await chrome.storage.local.set({ tab_sessions: sessions });
           });
-        } catch {
-          // Non-fatal
-        }
+        } catch {}
       }
     }
   }

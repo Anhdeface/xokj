@@ -1,6 +1,5 @@
 /**
  * XOKJ - Asynchronous CDP RPC Bridge & Event Multiplexer
- * Authoritative implementation for Milestone 2
  */
 
 import type {
@@ -236,7 +235,6 @@ export class CdpBridgeServer {
   ): Promise<CdpRpcResponse> {
     const reqId = request.id || `rpc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
-    // 1. Identity Verification: Must originate from a tab context
     const senderTabId = sender.tab?.id;
     if (senderTabId === undefined || senderTabId === null) {
       return {
@@ -250,7 +248,6 @@ export class CdpBridgeServer {
       };
     }
 
-    // 2. Anti-Spoofing: Declared tabId cannot claim a foreign tab
     if (request.tabId !== undefined && request.tabId !== senderTabId) {
       return {
         type: 'CDP_RPC_RESPONSE',
@@ -263,7 +260,6 @@ export class CdpBridgeServer {
       };
     }
 
-    // 3. Method validation
     if (!request.method || typeof request.method !== 'string' || request.method.trim() === '') {
       return {
         type: 'CDP_RPC_RESPONSE',
@@ -276,7 +272,6 @@ export class CdpBridgeServer {
       };
     }
 
-    // 4. Restricted URL guard
     const tabUrl = sender.tab?.url;
     if (tabUrl && isRestrictedUrl(tabUrl)) {
       return {
@@ -290,7 +285,6 @@ export class CdpBridgeServer {
       };
     }
 
-    // 5. Userscript Permission Validation (Feature 16)
     if (request.scriptId || this.enforcePermissions) {
       const permissionError = await this.validateScriptPermissions(request, sender);
       if (permissionError) {
@@ -303,7 +297,6 @@ export class CdpBridgeServer {
       }
     }
 
-    // 6. Execute against sender's verified tab ID
     return this.executeCommand(senderTabId, request.method, request.params, reqId);
   }
 
@@ -316,7 +309,6 @@ export class CdpBridgeServer {
   ): Promise<CdpRpcError | null> {
     const scriptId = request.scriptId;
 
-    // 1. Untagged request handling
     if (!scriptId || typeof scriptId !== 'string' || scriptId.trim() === '') {
       if (this.enforcePermissions) {
         return {
@@ -330,7 +322,6 @@ export class CdpBridgeServer {
 
     const trimmedId = scriptId.trim();
 
-    // 2. Registry existence check (uses in-memory cache to avoid disk reads & deep-cloning)
     let script: ScriptRecord | null = this.scriptCache.get(trimmedId) || null;
     if (!script) {
       script = await this.scriptResolver(trimmedId);
@@ -346,7 +337,6 @@ export class CdpBridgeServer {
       };
     }
 
-    // 3. Enabled status check
     if (!script.enabled) {
       return {
         code: 403,
@@ -355,7 +345,6 @@ export class CdpBridgeServer {
       };
     }
 
-    // 4. Tab URL match pattern & exclusion check
     const tabUrl = sender.url || sender.tab?.url;
     if (tabUrl && script.metadata) {
       const excludes = script.metadata.excludes || [];
@@ -383,7 +372,6 @@ export class CdpBridgeServer {
       }
     }
 
-    // 5. Grant and CDP directive check
     const grants: string[] = Array.isArray(script.metadata?.grants) ? script.metadata.grants : [];
     if (grants.includes('none')) {
       return {
@@ -427,9 +415,8 @@ export class CdpBridgeServer {
       };
     }
 
-    // 6. Domain-level authorization check
     if (hasCdpGrant) {
-      return null; // General grant authorizes all domains
+      return null;
     }
 
     const requestedDomain = request.method.split('.')[0];
@@ -475,7 +462,6 @@ export class CdpBridgeServer {
   ): Promise<CdpRpcResponse> {
     const id = requestId || `rpc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
-    // Fast-check if tab is already in CONFLICT status
     if (this.debuggerManager?.getTabStatus?.(tabId) === 'CONFLICT') {
       return {
         type: 'CDP_RPC_RESPONSE',
@@ -504,7 +490,6 @@ export class CdpBridgeServer {
         resolve
       };
 
-      // Register into inflight and tab mapping BEFORE awaiting ensureAttached
       this.inflightRequests.set(id, entry);
       if (!this.tabRequests.has(tabId)) {
         this.tabRequests.set(tabId, new Set());
@@ -515,7 +500,6 @@ export class CdpBridgeServer {
         try {
           await this.ensureAttached(tabId);
         } catch (attachErr: any) {
-          // If request was already rejected by concurrent detachment during ensureAttached, do not double-resolve
           if (!this.inflightRequests.has(id)) {
             return;
           }
@@ -544,7 +528,6 @@ export class CdpBridgeServer {
         }
       }
 
-      // Check if this request was already cancelled / rejected while awaiting ensureAttached
       if (!this.inflightRequests.has(id)) {
         return;
       }
@@ -640,7 +623,6 @@ export class CdpBridgeServer {
             await chrome.debugger.attach({ tabId }, this.protocolVersion);
           }
         }
-        // Memory leak guard: verify tab was not detached or closed while attach was suspended
         const isStillAttached = this.debuggerManager
           ? this.debuggerManager.isAttached(tabId)
           : this.attachLocks.get(tabId) === lock;
@@ -652,9 +634,7 @@ export class CdpBridgeServer {
           if (!this.debuggerManager && typeof chrome !== 'undefined' && chrome.debugger?.detach) {
             try {
               await chrome.debugger.detach({ tabId });
-            } catch {
-              // Benign
-            }
+            } catch {}
           }
         }
       } catch (err: any) {
@@ -665,18 +645,15 @@ export class CdpBridgeServer {
           err?.code === 1001 ||
           /another debugger|devtools|canceled_by_user|conflict/i.test(errMsg);
 
-        // Check if extension actually owns the attachment via debuggerManager
         const isActuallyAttached = this.debuggerManager
           ? this.debuggerManager.isAttached(tabId)
           : false;
 
-        // Genuine self-attachment idempotency: extension already owns session
         if (isActuallyAttached && !isConflict && hasAlreadyAttached) {
           this.attachedTabs.add(tabId);
           return;
         }
 
-        // Native DevTools or foreign debugger conflict
         if (isConflict || hasAlreadyAttached) {
           this.attachedTabs.delete(tabId);
 
@@ -702,7 +679,6 @@ export class CdpBridgeServer {
           throw conflictError;
         }
 
-        // Generic attach failure
         this.attachedTabs.delete(tabId);
         throw err;
       } finally {
@@ -749,7 +725,6 @@ export class CdpBridgeServer {
       }
     }
 
-    // UNCONDITIONAL CLEANUP: guarantees deallocation even when zero requests are inflight
     this.tabRequests.delete(tabId);
     this.attachedTabs.delete(tabId);
     this.attachLocks.delete(tabId);

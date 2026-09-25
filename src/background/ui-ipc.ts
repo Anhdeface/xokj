@@ -77,7 +77,7 @@ export class UiIpcServer {
             });
           }
         })();
-        return true; // Keep channel open for async response
+        return true;
       }
 
       case 'GET_CDP_STATUS': {
@@ -139,7 +139,6 @@ export class UiIpcServer {
       }
 
       default:
-        // Allow other background listeners (cdp-bridge, conflict-mgr) to handle other messages
         return undefined;
     }
   }

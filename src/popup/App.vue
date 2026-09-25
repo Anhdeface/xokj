@@ -112,7 +112,6 @@ const {
 </script>
 
 <style>
-/* Reset & base styling inside popup */
 html, body {
   margin: 0;
   padding: 0;
@@ -122,7 +121,6 @@ html, body {
   user-select: none;
 }
 
-/* Custom sleek scrollbar */
 ::-webkit-scrollbar {
   width: 5px;
   height: 5px;
@@ -243,7 +241,6 @@ html, body {
   transform: translateX(2px);
 }
 
-/* Animations */
 .banner-slide-enter-active,
 .banner-slide-leave-active {
   transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);

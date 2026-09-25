@@ -191,7 +191,6 @@ export function parseUserscript(code: string): ParseResult {
 
     const match = line.match(DIRECTIVE_REGEX);
     if (!match) {
-      // Non-directive line comment (e.g. "// License: MIT" inside block) is skipped
       continue;
     }
 
@@ -251,7 +250,6 @@ export function parseUserscript(code: string): ParseResult {
         }
         break;
       case 'run-at':
-        // First valid @run-at takes precedence
         if (!runAtSet) {
           metadata.runAt = normalizeRunAt(rawVal, errors);
           runAtSet = true;
@@ -299,7 +297,6 @@ export function parseUserscript(code: string): ParseResult {
         }
         break;
       default:
-        // Other custom/unrecognized directive (e.g. @license, @homepage) preserved in rawEntries
         break;
     }
   }
