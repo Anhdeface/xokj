@@ -65,7 +65,7 @@ function handleFaviconError() {
   padding: 8px 12px;
   background: linear-gradient(180deg, #161822 0%, #10121a 100%);
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  min-height: 24px;
+  min-height: 26px;
 }
 
 .brand {
@@ -97,62 +97,67 @@ function handleFaviconError() {
   font-weight: 700;
   color: #f8fafc;
   letter-spacing: 0.5px;
+  line-height: 1;
 }
 
 /* Elegant capsule pill for active tab domain */
 .tab-context-bar {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  gap: 7px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 9999px;
-  padding: 2px 4px 2px 8px;
-  max-width: 190px;
-  backdrop-filter: blur(4px);
+  padding: 3px 4px 3px 10px;
+  max-width: 200px;
+  height: 26px;
+  box-sizing: border-box;
+  backdrop-filter: blur(8px);
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .tab-context-bar:hover {
-  background: rgba(255, 255, 255, 0.07);
-  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .tab-host {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   overflow: hidden;
   min-width: 0;
 }
 
 .favicon {
-  width: 12px;
-  height: 12px;
-  border-radius: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
   flex-shrink: 0;
 }
 
 .globe-icon {
-  font-size: 9px;
+  font-size: 10px;
   color: #64748b;
   flex-shrink: 0;
 }
 
 .hostname {
-  color: #cbd5e1;
+  color: #e2e8f0;
   font-weight: 500;
-  font-size: 10.5px;
+  font-size: 11.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 125px;
-  line-height: 1;
+  max-width: 130px;
+  line-height: normal;
+  letter-spacing: 0.15px;
 }
 
 .reload-tab-btn {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   color: #94a3b8;
   width: 18px;
   height: 18px;
@@ -161,7 +166,7 @@ function handleFaviconError() {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  font-size: 8.5px;
+  font-size: 9px;
   padding: 0;
   flex-shrink: 0;
   transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
