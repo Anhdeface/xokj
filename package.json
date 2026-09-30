@@ -20,7 +20,8 @@
     "xobrow:build": "npm run --prefix packages/xobrow build",
     "xobrow:test": "npm run --prefix packages/xobrow test",
     "xobrow:e2e": "npx vitest run -c packages/xobrow/vitest.config.ts packages/xobrow/test/e2e/cli.test.ts",
-    "link": "npm link ./packages/xobrow"
+    "link": "npm link ./packages/xobrow",
+    "bump": "node scripts/bump-version.js"
   },
   "dependencies": {
     "@codemirror/commands": "^6.8.0",

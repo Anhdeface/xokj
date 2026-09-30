@@ -5,6 +5,24 @@ import { resolvePatterns } from './engine/glob.js';
 import { scanFiles } from './engine/scanner.js';
 import { formatDiagnostics } from './reporter/formatter.js';
 
+import { fileURLToPath } from 'node:url';
+
+function getPackageVersion(): string {
+  try {
+    const currentDir = path.dirname(fileURLToPath(import.meta.url));
+    const pkgPath = path.resolve(currentDir, '../package.json');
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+      if (typeof pkg.version === 'string') {
+        return pkg.version;
+      }
+    }
+  } catch {
+    // Fallback if bundled or file system access is restricted
+  }
+  return '0.1.0';
+}
+
 export interface RunCliOptions {
   exitOverride?: boolean;
   from?: 'node' | 'user';
@@ -20,12 +38,13 @@ export async function runCli(
 ): Promise<number> {
   const binName = path.basename(argv[1] || argv[0] || 'xobrow').replace(/\.[cm]?js$/, '');
   const commandName = binName === 'xb' ? 'xb' : 'xobrow';
+  const version = getPackageVersion();
 
   const program = new Command();
   program
     .name(commandName)
     .description('Uncompromising standalone CLI static analysis and security audit tool for userscripts targeting xokj')
-    .version('0.1.0', '-v, --version', 'output the version number')
+    .version(version, '-v, --version', 'output the version number')
     .helpOption('-h, --help', 'display help for command')
     .exitOverride();
 
