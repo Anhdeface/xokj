@@ -11,16 +11,17 @@ Uncompromising standalone CLI static analysis and security audit tool for usersc
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [CLI Usage & Commands](#cli-usage--commands)
-3. [Options & Flags](#options--flags)
-4. [Exit Code Protocol](#exit-code-protocol)
-5. [Rule Inventory](#rule-inventory)
-6. [Detailed Documentation Suite](#detailed-documentation-suite)
+1. [Overview](#1-overview)
+2. [CLI Usage & Commands](#2-cli-usage--commands)
+3. [Options & Flags](#3-options--flags)
+4. [Exit Code Protocol](#4-exit-code-protocol)
+5. [Rule Inventory](#5-rule-inventory)
+6. [Technology Stack & Dependency Matrix](#6-technology-stack--dependency-matrix)
+7. [Detailed Documentation Suite](#7-detailed-documentation-suite)
 
 ---
 
-## Overview
+## 1. Overview
 
 XoBrow is designed to inspect external JavaScript and TypeScript userscripts before execution in browser environments equipped with Chrome DevTools Protocol bridges.
 
@@ -30,7 +31,7 @@ XoBrow is designed to inspect external JavaScript and TypeScript userscripts bef
 
 ---
 
-## CLI Usage & Commands
+## 2. CLI Usage & Commands
 
 ```bash
 # Direct binary execution
@@ -47,7 +48,7 @@ xobrow check "scripts/**/*.user.js"
 
 ---
 
-## Options & Flags
+## 3. Options & Flags
 
 | Flag | Description |
 |---|---|
@@ -59,7 +60,7 @@ xobrow check "scripts/**/*.user.js"
 
 ---
 
-## Exit Codes
+## 4. Exit Codes
 
 - `0`: Clean pass (zero errors, and zero warnings in strict mode)
 - `1`: Violations detected (errors found, or warnings in strict mode)
@@ -67,7 +68,7 @@ xobrow check "scripts/**/*.user.js"
 
 ---
 
-## Rule Inventory
+## 5. Rule Inventory
 
 XoBrow implements 15 canonical rules across three categories:
 
@@ -77,7 +78,22 @@ XoBrow implements 15 canonical rules across three categories:
 
 ---
 
-## Detailed Documentation Suite
+## 6. Technology Stack & Dependency Matrix
+
+All dependencies are declared in [`package.json`](package.json) and resolved dynamically during build time:
+
+| Library | Role in Subsystem | Manifest Reference |
+|---|---|---|
+| **@babel/parser** | High-performance AST parser with TypeScript and top-level await support | [`package.json`](package.json) |
+| **commander** | Command-line argument parsing, options, and help generation | [`package.json`](package.json) |
+| **glob** | File system traversal and pattern-matching engine | [`package.json`](package.json) |
+| **picocolors** | High-speed, zero-dependency terminal ANSI formatting | [`package.json`](package.json) |
+| **TypeScript** | Static type checking and transpilation to ESM | [`package.json`](package.json) |
+| **Vitest** | Test runner for 400+ unit, adversarial, and E2E fixtures | [`package.json`](package.json) |
+
+---
+
+## 7. Detailed Documentation Suite
 
 Exhaustive technical documentation is available in `docs/`:
 

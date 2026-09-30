@@ -26,10 +26,11 @@ An open-source Chromium Userscript Manager built on Manifest V3, providing a hyb
    - [4.1. Metadata Directives](#41-metadata-directives)
    - [4.2. CDP Client API Interface](#42-cdp-client-api-interface)
    - [4.3. Standard GM API Polyfills](#43-standard-gm-api-polyfills)
-5. [Codebase Organization](#5-codebase-organization)
-6. [Building and Loading into Chromium](#6-building-and-loading-into-chromium)
-7. [Security and Execution Boundary Constraints](#7-security-and-execution-boundary-constraints)
-8. [License](#8-license)
+5. [Technology Stack and Dependency Matrix](#5-technology-stack-and-dependency-matrix)
+6. [Codebase Organization](#6-codebase-organization)
+7. [Building and Loading into Chromium](#7-building-and-loading-into-chromium)
+8. [Security and Execution Boundary Constraints](#8-security-and-execution-boundary-constraints)
+9. [License](#9-license)
 
 ---
 
@@ -218,7 +219,25 @@ Example Usage:
 
 ---
 
-## 5. Codebase Organization
+## 5. Technology Stack and Dependency Matrix
+
+All library dependencies are declared in [`package.json`](package.json) and resolved dynamically during build time:
+
+| Library / Framework | Role in Extension Subsystem | Manifest Reference |
+|---|---|---|
+| **Vue 3** | Reactive component model for Popup (`src/popup/`) and Dashboard (`src/dashboard/`) | [`package.json`](package.json) |
+| **CodeMirror 6** | Extensible browser-based code editor with JavaScript mode and themes | [`package.json`](package.json) |
+| **Vite** | Modern frontend build tool, dev server, and production bundler | [`package.json`](package.json) |
+| **@crxjs/vite-plugin** | Compiles Manifest V3 extension bundle with background service worker HMR | [`package.json`](package.json) |
+| **@fortawesome/fontawesome-free** | Iconography for status badges, buttons, and editor controls | [`package.json`](package.json) |
+| **TypeScript** | Static typing and compile-time contract enforcement | [`package.json`](package.json) |
+| **Vitest** | Fast unit and integration test runner | [`package.json`](package.json) |
+| **happy-dom** | In-memory DOM implementation for UI component unit tests | [`package.json`](package.json) |
+| **vue-tsc** | Type-checking engine for Vue Single File Components | [`package.json`](package.json) |
+
+---
+
+## 6. Codebase Organization
 
 ```
 xokj/
@@ -265,7 +284,7 @@ xokj/
 
 ---
 
-## 6. Building and Loading into Chromium
+## 7. Building and Loading into Chromium
 
 ### Prerequisites
 - Node.js >= 18.0.0
@@ -291,7 +310,7 @@ The compiled extension files are output to the `dist/` directory.
 
 ---
 
-## 7. Security and Execution Boundary Constraints
+## 8. Security and Execution Boundary Constraints
 
 1. **Tab Identity Scoping**: The service worker verifies `sender.tab.id` on every incoming RPC request. A userscript running in Tab A cannot send CDP commands to Tab B.
 2. **Channel Token Verification**: Inter-world communication between the MAIN world and ISOLATED world uses structured payload verification with unique runtime channel tokens.
@@ -300,6 +319,6 @@ The compiled extension files are output to the `dist/` directory.
 
 ---
 
-## 8. License
+## 9. License
 
 MIT License. See [LICENSE](LICENSE) for details.

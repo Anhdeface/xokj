@@ -16,18 +16,14 @@ A high-performance monorepo providing a Chromium Userscript Manager with a Hybri
 2. [Packages & Component Inventory](#2-packages--component-inventory)
    - [2.1. XOKJ Extension (Root / `src/`)](#21-xokj-extension-root--src)
    - [2.2. XoBrow CLI Auditor (`packages/xobrow`)](#22-xobrow-cli-auditor-packagesxobrow)
-3. [Technology Stack & Dependency Matrix](#3-technology-stack--dependency-matrix)
-   - [3.1. XOKJ Extension Libraries](#31-xokj-extension-libraries)
-   - [3.2. XoBrow CLI Auditor Libraries](#32-xobrow-cli-auditor-libraries)
-4. [Monorepo Quickstart & Setup Guide](#4-monorepo-quickstart--setup-guide)
-   - [4.1. Prerequisites](#41-prerequisites)
-   - [4.2. Installation and Build](#42-installation-and-build)
-   - [4.3. Global CLI Registration via npm link](#43-global-cli-registration-via-npm-link)
-   - [4.4. Unified Version Management](#44-unified-version-management)
-5. [NPM Scripts Reference](#5-npm-scripts-reference)
-6. [Repository Directory Structure](#6-repository-directory-structure)
-7. [Master Documentation Directory](#7-master-documentation-directory)
-8. [License](#8-license)
+3. [Monorepo Quickstart & Setup Guide](#3-monorepo-quickstart--setup-guide)
+   - [3.1. Prerequisites](#31-prerequisites)
+   - [3.2. Installation and Build](#32-installation-and-build)
+   - [3.3. Global CLI Registration via npm link](#33-global-cli-registration-via-npm-link)
+   - [3.4. Unified Version Management](#34-unified-version-management)
+4. [NPM Scripts Reference](#4-npm-scripts-reference)
+5. [Repository Directory Structure](#5-repository-directory-structure)
+6. [License](#6-license)
 
 ---
 
@@ -85,44 +81,13 @@ XoBrow is a strict, standalone CLI static analysis tool (`xobrow` and alias `xb`
 
 ---
 
-## 3. Technology Stack & Dependency Matrix
+## 3. Monorepo Quickstart & Setup Guide
 
-All versions are resolved dynamically from workspace `package.json` manifests.
-
-### 3.1. XOKJ Extension Libraries
-
-| Library | Role in Subsystem | Resolution Source |
-|---|---|---|
-| **Vue 3** | Reactive UI framework for extension Popup and Dashboard | [`package.json`](package.json) |
-| **CodeMirror 6** | Extensible in-browser code editor with JavaScript syntax highlighting | [`package.json`](package.json) |
-| **Vite** | Next-generation frontend tooling and production bundler | [`package.json`](package.json) |
-| **@crxjs/vite-plugin** | Compiles Manifest V3 Chrome Extension with HMR support | [`package.json`](package.json) |
-| **@fortawesome/fontawesome-free** | Iconography assets for dashboard and popup controls | [`package.json`](package.json) |
-| **TypeScript** | Static typing and interface contracts | [`package.json`](package.json) |
-| **Vitest** | Unit, component, and integration test execution framework | [`package.json`](package.json) |
-| **happy-dom** | Lightweight in-memory DOM simulation for component unit tests | [`package.json`](package.json) |
-| **vue-tsc** | Type-checking engine for Vue Single File Components (SFC) | [`package.json`](package.json) |
-
-### 3.2. XoBrow CLI Auditor Libraries
-
-| Library | Role in Subsystem | Resolution Source |
-|---|---|---|
-| **@babel/parser** | High-performance AST parser with TypeScript and top-level await support | [`packages/xobrow/package.json`](packages/xobrow/package.json) |
-| **commander** | Command-line argument parsing, options, and help generation | [`packages/xobrow/package.json`](packages/xobrow/package.json) |
-| **glob** | File system traversal and pattern-matching engine | [`packages/xobrow/package.json`](packages/xobrow/package.json) |
-| **picocolors** | High-speed, zero-dependency terminal ANSI formatting | [`packages/xobrow/package.json`](packages/xobrow/package.json) |
-| **TypeScript** | Static type checking and transpilation to ESM | [`packages/xobrow/package.json`](packages/xobrow/package.json) |
-| **Vitest** | Test runner for 400+ unit, adversarial, and E2E fixtures | [`packages/xobrow/package.json`](packages/xobrow/package.json) |
-
----
-
-## 4. Monorepo Quickstart & Setup Guide
-
-### 4.1. Prerequisites
+### 3.1. Prerequisites
 - Node.js >= 18.0.0
 - npm >= 9.0.0
 
-### 4.2. Installation and Build
+### 3.2. Installation and Build
 ```bash
 # Clone the repository
 git clone https://github.com/Anhdeface/xokj.git
@@ -138,7 +103,7 @@ npm run build
 npm run xobrow:build
 ```
 
-### 4.3. Global CLI Registration via npm link
+### 3.3. Global CLI Registration via npm link
 To use `xb` and `xobrow` from any directory on your operating system:
 ```bash
 # Run the link script from the monorepo root
@@ -149,7 +114,7 @@ xb --version
 xobrow --help
 ```
 
-### 4.4. Unified Version Management
+### 3.4. Unified Version Management
 The repository includes a unified version manager (`scripts/bump-version.js`) to increment versions without hardcoding:
 ```bash
 # Increment patch (0.2.0 -> 0.2.1) across all packages
@@ -164,7 +129,7 @@ npm run bump minor --tag
 
 ---
 
-## 5. NPM Scripts Reference
+## 4. NPM Scripts Reference
 
 The root `package.json` provides unified scripts to manage all components in the monorepo:
 
@@ -186,7 +151,7 @@ The root `package.json` provides unified scripts to manage all components in the
 
 ---
 
-## 6. Repository Directory Structure
+## 5. Repository Directory Structure
 
 ```
 xokj/
@@ -231,21 +196,6 @@ xokj/
 
 ---
 
-## 7. Master Documentation Directory
-
-| Document | Format | Location | Primary Audience |
-|---|---|---|---|
-| Monorepo Master Index | Markdown | [`README.md`](README.md) | All developers & maintainers |
-| Extension Technical Manual | Markdown | [`README_EXTENSION.md`](README_EXTENSION.md) | Extension developers & userscript authors |
-| Extension Technical Spec | Markdown | [`docs/XOKJ_TECHNICAL_SPEC.md`](docs/XOKJ_TECHNICAL_SPEC.md) | Core architects & security auditors |
-| XoBrow Package Overview | Markdown | [`packages/xobrow/README.md`](packages/xobrow/README.md) | CLI users & script developers |
-| XoBrow Architecture & Internals | Text | [`packages/xobrow/docs/01_ARCHITECTURE_AND_INTERNALS.txt`](packages/xobrow/docs/01_ARCHITECTURE_AND_INTERNALS.txt) | Tooling engineers & rule contributors |
-| XoBrow CLI & CI/CD Manual | Text | [`packages/xobrow/docs/02_CLI_USAGE_AND_INTEGRATION.txt`](packages/xobrow/docs/02_CLI_USAGE_AND_INTEGRATION.txt) | DevOps & automation engineers |
-| XoBrow npm link Guide | Text | [`packages/xobrow/docs/03_INSTALLATION_AND_GLOBAL_LINKING.txt`](packages/xobrow/docs/03_INSTALLATION_AND_GLOBAL_LINKING.txt) | Local environment configuration |
-| XoBrow 15-Rule Specification | Text | [`packages/xobrow/docs/04_RULES_REFERENCE.txt`](packages/xobrow/docs/04_RULES_REFERENCE.txt) | Security auditors & userscript authors |
-
----
-
-## 8. License
+## 6. License
 
 MIT License. See [LICENSE](LICENSE) for details.
