@@ -1,5 +1,11 @@
 # XOKJ Monorepo: Userscript Engine & Static Analysis Ecosystem
 
+[![xokj Version](https://img.shields.io/github/package-json/v/Anhdeface/xokj?filename=package.json&label=xokj%20version&color=blue)](package.json)
+[![xobrow Version](https://img.shields.io/github/package-json/v/Anhdeface/xokj?filename=packages%2Fxobrow%2Fpackage.json&label=xobrow%20version&color=indigo)](packages/xobrow/package.json)
+[![Manifest](https://img.shields.io/badge/Manifest-V3-success)](manifest.config.ts)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18.0.0-339933)](package.json)
+[![License](https://img.shields.io/github/license/Anhdeface/xokj?color=gray)](LICENSE)
+
 A high-performance monorepo providing a Chromium Userscript Manager with a Hybrid Chrome DevTools Protocol (CDP) control plane alongside a strict standalone static analysis and security auditing CLI tool.
 
 ---
@@ -7,30 +13,36 @@ A high-performance monorepo providing a Chromium Userscript Manager with a Hybri
 ## Table of Contents
 
 1. [Monorepo Overview](#1-monorepo-overview)
-2. [Packages and Component Inventory](#2-packages-and-component-inventory)
+2. [Packages & Component Inventory](#2-packages--component-inventory)
    - [2.1. XOKJ Extension (Root / `src/`)](#21-xokj-extension-root--src)
    - [2.2. XoBrow CLI Auditor (`packages/xobrow`)](#22-xobrow-cli-auditor-packagesxobrow)
-3. [Monorepo Quickstart & Setup Guide](#3-monorepo-quickstart--setup-guide)
-   - [3.1. Prerequisites](#31-prerequisites)
-   - [3.2. Installation and Build](#32-installation-and-build)
-   - [3.3. Global CLI Registration via npm link](#33-global-cli-registration-via-npm-link)
-4. [NPM Scripts Reference](#4-npm-scripts-reference)
-5. [Repository Directory Structure](#5-repository-directory-structure)
-6. [Master Documentation Directory](#6-master-documentation-directory)
-7. [License](#7-license)
+3. [Technology Stack & Dependency Matrix](#3-technology-stack--dependency-matrix)
+   - [3.1. XOKJ Extension Libraries](#31-xokj-extension-libraries)
+   - [3.2. XoBrow CLI Auditor Libraries](#32-xobrow-cli-auditor-libraries)
+4. [Monorepo Quickstart & Setup Guide](#4-monorepo-quickstart--setup-guide)
+   - [4.1. Prerequisites](#41-prerequisites)
+   - [4.2. Installation and Build](#42-installation-and-build)
+   - [4.3. Global CLI Registration via npm link](#43-global-cli-registration-via-npm-link)
+   - [4.4. Unified Version Management](#44-unified-version-management)
+5. [NPM Scripts Reference](#5-npm-scripts-reference)
+6. [Repository Directory Structure](#6-repository-directory-structure)
+7. [Master Documentation Directory](#7-master-documentation-directory)
+8. [License](#8-license)
 
 ---
 
 ## 1. Monorepo Overview
 
-The `xokj` repository is configured as an npm workspace monorepo consisting of two primary components:
+The `xokj` repository is structured as an npm workspace monorepo containing two integrated subsystems:
 
-1. **XOKJ Browser Extension**: A Manifest V3 userscript manager for Chromium browsers with direct CDP integration.
-2. **XoBrow (`xb`) Static Analyzer**: A standalone command-line audit tool designed to evaluate external userscript quality, security risks, memory leak hazards, and CDP protocol compliance prior to execution.
+1. **XOKJ Browser Extension**: A Manifest V3 userscript manager for Chromium browsers featuring direct Chrome DevTools Protocol (CDP) integration via `chrome.debugger`.
+2. **XoBrow (`xb`) Static Analyzer**: A standalone command-line audit tool designed to evaluate external userscript quality, security risks, memory leak hazards, and CDP protocol compliance prior to browser execution.
+
+Both subsystems maintain decoupled version lifecycles, unified dependency trees, and shared typing contracts.
 
 ---
 
-## 2. Packages and Component Inventory
+## 2. Packages & Component Inventory
 
 ### 2.1. XOKJ Extension (Root / `src/`)
 
@@ -73,13 +85,44 @@ XoBrow is a strict, standalone CLI static analysis tool (`xobrow` and alias `xb`
 
 ---
 
-## 3. Monorepo Quickstart & Setup Guide
+## 3. Technology Stack & Dependency Matrix
 
-### 3.1. Prerequisites
+All versions are resolved dynamically from workspace `package.json` manifests.
+
+### 3.1. XOKJ Extension Libraries
+
+| Library | Role in Subsystem | Resolution Source |
+|---|---|---|
+| **Vue 3** | Reactive UI framework for extension Popup and Dashboard | [`package.json`](package.json) |
+| **CodeMirror 6** | Extensible in-browser code editor with JavaScript syntax highlighting | [`package.json`](package.json) |
+| **Vite** | Next-generation frontend tooling and production bundler | [`package.json`](package.json) |
+| **@crxjs/vite-plugin** | Compiles Manifest V3 Chrome Extension with HMR support | [`package.json`](package.json) |
+| **@fortawesome/fontawesome-free** | Iconography assets for dashboard and popup controls | [`package.json`](package.json) |
+| **TypeScript** | Static typing and interface contracts | [`package.json`](package.json) |
+| **Vitest** | Unit, component, and integration test execution framework | [`package.json`](package.json) |
+| **happy-dom** | Lightweight in-memory DOM simulation for component unit tests | [`package.json`](package.json) |
+| **vue-tsc** | Type-checking engine for Vue Single File Components (SFC) | [`package.json`](package.json) |
+
+### 3.2. XoBrow CLI Auditor Libraries
+
+| Library | Role in Subsystem | Resolution Source |
+|---|---|---|
+| **@babel/parser** | High-performance AST parser with TypeScript and top-level await support | [`packages/xobrow/package.json`](packages/xobrow/package.json) |
+| **commander** | Command-line argument parsing, options, and help generation | [`packages/xobrow/package.json`](packages/xobrow/package.json) |
+| **glob** | File system traversal and pattern-matching engine | [`packages/xobrow/package.json`](packages/xobrow/package.json) |
+| **picocolors** | High-speed, zero-dependency terminal ANSI formatting | [`packages/xobrow/package.json`](packages/xobrow/package.json) |
+| **TypeScript** | Static type checking and transpilation to ESM | [`packages/xobrow/package.json`](packages/xobrow/package.json) |
+| **Vitest** | Test runner for 400+ unit, adversarial, and E2E fixtures | [`packages/xobrow/package.json`](packages/xobrow/package.json) |
+
+---
+
+## 4. Monorepo Quickstart & Setup Guide
+
+### 4.1. Prerequisites
 - Node.js >= 18.0.0
 - npm >= 9.0.0
 
-### 3.2. Installation and Build
+### 4.2. Installation and Build
 ```bash
 # Clone the repository
 git clone https://github.com/Anhdeface/xokj.git
@@ -95,7 +138,7 @@ npm run build
 npm run xobrow:build
 ```
 
-### 3.3. Global CLI Registration via npm link
+### 4.3. Global CLI Registration via npm link
 To use `xb` and `xobrow` from any directory on your operating system:
 ```bash
 # Run the link script from the monorepo root
@@ -106,9 +149,22 @@ xb --version
 xobrow --help
 ```
 
+### 4.4. Unified Version Management
+The repository includes a unified version manager (`scripts/bump-version.js`) to increment versions without hardcoding:
+```bash
+# Increment patch (0.2.0 -> 0.2.1) across all packages
+npm run bump patch
+
+# Increment minor (0.2.0 -> 0.3.0) across all packages
+npm run bump minor
+
+# Increment and automatically create Git commit + tag
+npm run bump minor --tag
+```
+
 ---
 
-## 4. NPM Scripts Reference
+## 5. NPM Scripts Reference
 
 The root `package.json` provides unified scripts to manage all components in the monorepo:
 
@@ -126,10 +182,11 @@ The root `package.json` provides unified scripts to manage all components in the
 | `npm run xobrow:test` | XoBrow CLI | Executes unit and adversarial test suites in `packages/xobrow`. |
 | `npm run xobrow:e2e` | XoBrow CLI | Runs dedicated E2E fixture verification suite. |
 | `npm run link` | Monorepo System | Creates global system-wide symlinks for `xb` and `xobrow`. |
+| `npm run bump [type]` | Monorepo System | Updates semver versions across all workspace `package.json` files. |
 
 ---
 
-## 5. Repository Directory Structure
+## 6. Repository Directory Structure
 
 ```
 xokj/
@@ -140,6 +197,9 @@ xokj/
 ├── manifest.config.ts         # Manifest V3 declarative configuration
 ├── vite.config.ts             # Vite bundler configuration
 ├── tsconfig.json              # TypeScript root configuration
+│
+├── scripts/                   # Workspace automation scripts
+│   └── bump-version.js        # Semver version management utility
 │
 ├── docs/                      # Extension technical documentation
 │   └── XOKJ_TECHNICAL_SPEC.md # Full system specification for the xokj extension
@@ -171,7 +231,7 @@ xokj/
 
 ---
 
-## 6. Master Documentation Directory
+## 7. Master Documentation Directory
 
 | Document | Format | Location | Primary Audience |
 |---|---|---|---|
@@ -186,6 +246,6 @@ xokj/
 
 ---
 
-## 7. License
+## 8. License
 
 MIT License. See [LICENSE](LICENSE) for details.

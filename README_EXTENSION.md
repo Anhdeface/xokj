@@ -1,5 +1,12 @@
 # XOKJ Extension Technical Manual
 
+[![Extension Version](https://img.shields.io/github/package-json/v/Anhdeface/xokj?filename=package.json&label=extension%20version&color=blue)](package.json)
+[![Manifest](https://img.shields.io/badge/Manifest-V3-success)](manifest.config.ts)
+[![Vue](https://img.shields.io/github/package-json/dependency-version/Anhdeface/xokj/vue?filename=package.json&color=emerald)](package.json)
+[![Vite](https://img.shields.io/github/package-json/dependency-version/Anhdeface/xokj/vite?filename=package.json&color=purple)](package.json)
+[![CodeMirror](https://img.shields.io/github/package-json/dependency-version/Anhdeface/xokj/codemirror?filename=package.json&color=blue)](package.json)
+[![License](https://img.shields.io/github/license/Anhdeface/xokj?color=gray)](LICENSE)
+
 An open-source Chromium Userscript Manager built on Manifest V3, providing a hybrid Chrome DevTools Protocol (CDP) control plane for browser automation and userscript development.
 
 ---
