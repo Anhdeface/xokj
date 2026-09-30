@@ -1,0 +1,377 @@
+================================================================================
+XOBROW DOCUMENTATION: RULES REFERENCE AND AUDIT SPECIFICATION
+================================================================================
+
+This document provides the complete technical specification for all 15 static
+analysis rules implemented in XoBrow.
+
+================================================================================
+CATEGORY 1: SECURITY POLICY ENFORCEMENT (6 RULES)
+================================================================================
+
+1. RULE ID: sec-no-eval
+   Category: security
+   Default Severity: error
+   Rationale:
+     `eval()` compiles and executes arbitrary strings within the caller's
+     scope. In userscript environments, this enables remote code injection,
+     breaks extension sandbox isolation, prevents JavaScript engine JIT
+     optimizations, and introduces critical vulnerabilities.
+   AST Detection Logic:
+     - Direct `eval(...)` call expressions.
+     - Indirect aliased calls, e.g. `(0, eval)("...")`, `window.eval(...)`,
+       or `globalThis['eval'](...)`.
+     - Computed member expressions resolving to the identifier "eval".
+   Non-Compliant Example:
+     const data = eval("(" + responseText + ")");
+   Compliant Example:
+     const data = JSON.parse(responseText);
+   Remediation:
+     Replace dynamic string evaluation with JSON.parse(), static function
+     declarations, or structured object lookup tables.
+
+--------------------------------------------------------------------------------
+
+2. RULE ID: sec-no-new-function
+   Category: security
+   Default Severity: error
+   Rationale:
+     `new Function(...)` or `Function(...)` dynamically creates a new function
+     instance from raw strings. Similar to `eval()`, it enables dynamic code
+     synthesis and remote payload execution.
+   AST Detection Logic:
+     - `new Function(...)` constructor expressions.
+     - Direct `Function(...)` call expressions.
+     - Dynamic function constructors via `window.Function` or constructor chains.
+   Non-Compliant Example:
+     const calculator = new Function("a", "b", "return a + b;");
+   Compliant Example:
+     const calculator = (a, b) => a + b;
+   Remediation:
+     Define standard JavaScript/TypeScript functions or closures instead of
+     constructing functions from strings at runtime.
+
+--------------------------------------------------------------------------------
+
+3. RULE ID: sec-no-string-timers
+   Category: security
+   Default Severity: error
+   Rationale:
+     Passing a string argument to `setTimeout()` or `setInterval()` forces the
+     runtime to implicitly evaluate the string via the `eval` compiler mechanism.
+   AST Detection Logic:
+     - `setTimeout(arg, ms)` or `setInterval(arg, ms)` where `arg` is a string
+       literal, template literal, or string variable.
+   Non-Compliant Example:
+     setTimeout("console.log('Delayed tick')", 1000);
+   Compliant Example:
+     setTimeout(() => console.log('Delayed tick'), 1000);
+   Remediation:
+     Pass a direct function reference or arrow function callback to timer APIs.
+
+--------------------------------------------------------------------------------
+
+4. RULE ID: sec-no-unsafe-dom-sink
+   Category: security
+   Default Severity: error
+   Rationale:
+     Assigning untrusted or unescaped strings to `.innerHTML`, `.outerHTML`, or
+     calling `document.write()` creates Cross-Site Scripting (XSS) injection
+     vectors in the target document.
+   AST Detection Logic:
+     - Assignment expressions where the left-hand property is `innerHTML` or
+       `outerHTML`.
+     - Call expressions targeting `document.write()` or `document.writeln()`.
+   Non-Compliant Example:
+     element.innerHTML = "<div>" + userInput + "</div>";
+   Compliant Example:
+     const div = document.createElement("div");
+     div.textContent = userInput;
+     element.appendChild(div);
+   Remediation:
+     Use `textContent`, `innerText`, DOM manipulation methods
+     (`document.createElement`, `appendChild`), or sanitize input using a
+     DOMPurify pipeline prior to insertion.
+
+--------------------------------------------------------------------------------
+
+5. RULE ID: sec-no-prototype-pollution
+   Category: security
+   Default Severity: error
+   Rationale:
+     Mutating global prototypes (`Object.prototype`, `__proto__`, or via
+     `Object.setPrototypeOf`) alters object properties application-wide,
+     allowing attackers or buggy scripts to inject malicious properties across
+     all JavaScript objects in the browser context.
+   AST Detection Logic:
+     - Member assignments to `__proto__` or `Object.prototype`.
+     - Calls to `Object.setPrototypeOf(obj, ...)`.
+     - Calls to `Object.assign(Object.prototype, ...)`.
+     - Calls to `Reflect.setPrototypeOf(...)`.
+   Non-Compliant Example:
+     Object.prototype.customHelper = function() { return 42; };
+   Compliant Example:
+     const customHelper = (obj) => { return 42; };
+   Remediation:
+     Use standalone utility functions, Maps, Sets, or `Object.create(null)`
+     dictionaries rather than modifying built-in object prototypes.
+
+--------------------------------------------------------------------------------
+
+6. RULE ID: sec-no-script-injection
+   Category: security
+   Default Severity: error
+   Rationale:
+     Dynamically generating and inserting `<script>` elements into the page DOM
+     bypasses userscript sandbox boundaries and can lead to remote script
+     injections. Userscripts requiring page evaluation should utilize the
+     sanctioned `Runtime.evaluate` or `Page.addScriptToEvaluateOnNewDocument`
+     APIs provided by the xokj CDP bridge.
+   AST Detection Logic:
+     - Calls to `document.createElement('script')` or
+       `document.createElementNS(..., 'script')`.
+   Non-Compliant Example:
+     const s = document.createElement("script");
+     s.src = "https://example.com/payload.js";
+     document.head.appendChild(s);
+   Compliant Example:
+     // Utilize the controlled CDP Page domain
+     await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+       source: "console.log('Injected via CDP control plane');"
+     });
+   Remediation:
+     Use official xokj CDP bridge APIs (`Runtime.evaluate` or
+     `Page.addScriptToEvaluateOnNewDocument`) rather than DOM script tags.
+
+================================================================================
+CATEGORY 2: RESOURCE LEAK PREVENTION (4 RULES)
+================================================================================
+
+7. RULE ID: leak-uncleaned-event-listener
+   Category: resource-leak
+   Default Severity: error
+   Rationale:
+     Registering event listeners on long-lived objects (`window`, `document`,
+     DOM nodes) without removal logic causes memory leaks and detached DOM node
+     retention when userscripts re-run or navigate SPA pages.
+   AST Detection Logic:
+     - Reconciles `addEventListener` calls during Pass 2 (`postCheck`).
+     - Passes if accompanied by a corresponding `removeEventListener`.
+     - Passes if configured with `{ once: true }`.
+     - Passes if bound to an `AbortSignal` (`{ signal: controller.signal }`).
+   Non-Compliant Example:
+     window.addEventListener("scroll", () => { updateUI(); });
+   Compliant Example:
+     // Option A: Explicit cleanup
+     const onScroll = () => updateUI();
+     window.addEventListener("scroll", onScroll);
+     window.addEventListener("unload", () => window.removeEventListener("scroll", onScroll));
+
+     // Option B: Auto-cleanup with once
+     window.addEventListener("load", init, { once: true });
+
+     // Option C: AbortSignal controller
+     const controller = new AbortController();
+     window.addEventListener("scroll", onScroll, { signal: controller.signal });
+   Remediation:
+     Supply `{ once: true }`, attach an `AbortSignal`, or store the listener
+     reference and register `removeEventListener` in a teardown lifecycle hook.
+
+--------------------------------------------------------------------------------
+
+8. RULE ID: leak-lingering-interval
+   Category: resource-leak
+   Default Severity: error
+   Rationale:
+     `setInterval` repeatedly executes a callback indefinitely. Failing to
+     retain the interval handle and invoke `clearInterval` causes permanent CPU
+     and timer leaks.
+   AST Detection Logic:
+     - Tracks `setInterval` call expressions.
+     - In Pass 2 (`postCheck`), verifies whether the variable receiving the
+       interval ID is referenced inside a `clearInterval(id)` call.
+   Non-Compliant Example:
+     setInterval(() => { syncData(); }, 5000);
+   Compliant Example:
+     const timerId = setInterval(() => { syncData(); }, 5000);
+     window.addEventListener("beforeunload", () => clearInterval(timerId));
+   Remediation:
+     Store the interval ID in a variable and invoke `clearInterval(id)` when the
+     task completes or during component/page unmount.
+
+--------------------------------------------------------------------------------
+
+9. RULE ID: leak-unclosed-cdp-listener
+   Category: resource-leak
+   Default Severity: error
+   Rationale:
+     CDP event listeners (`cdp.on(...)` or `GM_cdp.on(...)`) establish active
+     event streaming from the browser debugger backend. Unclosed listeners
+     retain debugger sessions and consume background IPC bandwidth.
+   AST Detection Logic:
+     - Reconciles `cdp.on(event, handler)` subscriptions.
+     - Verifies if `cdp.off(event, handler)` or the returned unsubscribe
+       callback is invoked within lifecycle teardown logic.
+   Non-Compliant Example:
+     cdp.on("Network.requestWillBeSent", (params) => {
+       console.log("Request URL:", params.request.url);
+     });
+   Compliant Example:
+     const handler = (params) => console.log(params.request.url);
+     cdp.on("Network.requestWillBeSent", handler);
+     window.addEventListener("unload", () => cdp.off("Network.requestWillBeSent", handler));
+   Remediation:
+     Call `cdp.off(event, handler)` or invoke the unsubscribe function when
+     the inspection lifecycle concludes.
+
+--------------------------------------------------------------------------------
+
+10. RULE ID: leak-unbounded-async-loop
+    Category: resource-leak
+    Default Severity: error
+    Rationale:
+      An infinite loop (`while (true)` or `for (;;)`) executing asynchronous CDP
+      commands without a throttling delay or exit condition can saturate the CDP
+      message pipe, crash the browser debugger, and cause UI thread freezing.
+    AST Detection Logic:
+      - Inspects `while (true)`, `while (1)`, and `for (;;)` loops containing
+        CDP call expressions.
+      - Checks whether the loop body contains a sleep delay (e.g.
+        `await new Promise(...)` or `await sleep(ms)`), a conditional `break`,
+        `return`, or `throw`.
+    Non-Compliant Example:
+      while (true) {
+        await cdp.send("DOM.getDocument");
+      }
+    Compliant Example:
+      while (isRunning) {
+        await cdp.send("DOM.getDocument");
+        await new Promise(resolve => setTimeout(resolve, 500)); // Throttled
+      }
+    Remediation:
+      Introduce an `await sleep(ms)` delay inside the loop and define a valid
+      exit condition or loop counter.
+
+================================================================================
+CATEGORY 3: CHROME DEVTOOLS PROTOCOL (CDP) INTEGRITY (5 RULES)
+================================================================================
+
+11. RULE ID: cdp-valid-domain-method
+    Category: cdp-integrity
+    Default Severity: error
+    Rationale:
+      CDP commands must conform to standard Chrome DevTools Protocol domain and
+      method names. Sending non-existent methods results in runtime protocol
+      rejections.
+    AST Detection Logic:
+      - Analyzes `cdp.send("Domain.method", ...)` and `GM_cdp.send(...)` calls.
+      - Validates the method string against the official CDP protocol catalog
+        (including Page, Network, DOM, Runtime, Fetch, Target, Emulation, etc.).
+    Non-Compliant Example:
+      await cdp.send("Browser.invalidAction");
+    Compliant Example:
+      await cdp.send("Page.navigate", { url: "https://example.com" });
+    Remediation:
+      Correct the CDP domain and method name to match the official Chrome
+      DevTools Protocol specification.
+
+--------------------------------------------------------------------------------
+
+12. RULE ID: cdp-header-permission
+    Category: cdp-integrity
+    Default Severity: error
+    Rationale:
+      xokj enforces privilege separation. Userscripts invoking CDP domains
+      must explicitly request permission in the metadata header via `@grant` or
+      `@cdp` directives.
+    AST Detection Logic:
+      - Correlates all invoked CDP domains in the AST with parsed header
+        metadata (`@grant GM_cdp`, `@cdp Domain.*`, `@grant cdp:Domain`).
+    Non-Compliant Example:
+      // ==UserScript==
+      // @name Unprivileged Script
+      // @grant none
+      // ==/UserScript==
+      await cdp.send("Network.enable");
+    Compliant Example:
+      // ==UserScript==
+      // @name Privileged Script
+      // @grant GM_cdp
+      // @cdp Network.*
+      // ==/UserScript==
+      await cdp.send("Network.enable");
+    Remediation:
+      Add `@grant GM_cdp` or `@cdp <Domain>` to the userscript header block.
+
+--------------------------------------------------------------------------------
+
+13. RULE ID: cdp-handled-async-reject
+    Category: cdp-integrity
+    Default Severity: warning
+    Rationale:
+      CDP commands return Promises that reject if the browser tab closes or the
+      debugger detaches. Unhandled rejections result in unhandled promise
+      rejection crashes.
+    AST Detection Logic:
+      - Identifies CDP call expressions (`cdp.send(...)`).
+      - Flags calls that lack an `await` operator, `.catch(...)` chained handler,
+        or wrapping `try { ... } catch` block.
+    Non-Compliant Example:
+      cdp.send("Page.reload"); // Floating unhandled promise
+    Compliant Example:
+      try {
+        await cdp.send("Page.reload");
+      } catch (err) {
+        console.error("CDP command failed:", err);
+      }
+    Remediation:
+      Wrap CDP calls in `try/catch` with `await`, or append a `.catch()` handler.
+
+--------------------------------------------------------------------------------
+
+14. RULE ID: cdp-no-tight-polling
+    Category: cdp-integrity
+    Default Severity: error
+    Rationale:
+      Invoking CDP commands inside high-frequency polling intervals (< 100ms)
+      floods the Chromium IPC channel and causes severe browser performance
+      degradation.
+    AST Detection Logic:
+      - Flags `setInterval(..., ms)` callbacks containing CDP calls where `ms`
+        is a numeric literal less than 100.
+    Non-Compliant Example:
+      setInterval(async () => {
+        await cdp.send("DOM.getDocument");
+      }, 20); // 20ms polling is prohibited
+    Compliant Example:
+      setInterval(async () => {
+        await cdp.send("DOM.getDocument");
+      }, 500); // 500ms throttled polling
+    Remediation:
+      Increase the interval delay to at least 100ms or replace polling with CDP
+      event listeners (`cdp.on(...)`).
+
+--------------------------------------------------------------------------------
+
+15. RULE ID: cdp-valid-payload
+    Category: cdp-integrity
+    Default Severity: error
+    Rationale:
+      Parameters for `cdp.send(method, params)` must be structured object
+      dictionaries containing named key-value pairs per CDP protocol schemas.
+      Passing primitives (strings, numbers, booleans) causes runtime protocol
+      deserialization errors.
+    AST Detection Logic:
+      - Inspects the second argument of `cdp.send(method, params)`.
+      - Flags invocations where the second argument is a string, number, boolean,
+        or invalid primitive.
+    Non-Compliant Example:
+      await cdp.send("Page.navigate", "https://example.com"); // String primitive
+    Compliant Example:
+      await cdp.send("Page.navigate", { url: "https://example.com" }); // Object
+    Remediation:
+      Pass parameters as a structured object dictionary `{ paramName: value }`.
+
+================================================================================
+END OF RULES REFERENCE AND AUDIT SPECIFICATION
+================================================================================

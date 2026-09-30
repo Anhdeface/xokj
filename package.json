@@ -2,6 +2,9 @@
   "name": "xokj",
   "version": "0.2.0",
   "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
   "type": "module",
   "description": "Chromium Userscript Manager with Hybrid CDP Control Plane",
   "scripts": {
@@ -11,7 +14,13 @@
     "type-check": "vue-tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "xb": "node packages/xobrow/bin/xobrow.js",
+    "xobrow": "node packages/xobrow/bin/xobrow.js",
+    "xobrow:build": "npm run --prefix packages/xobrow build",
+    "xobrow:test": "npm run --prefix packages/xobrow test",
+    "xobrow:e2e": "npx vitest run -c packages/xobrow/vitest.config.ts packages/xobrow/test/e2e/cli.test.ts",
+    "link": "npm link ./packages/xobrow"
   },
   "dependencies": {
     "@codemirror/commands": "^6.8.0",

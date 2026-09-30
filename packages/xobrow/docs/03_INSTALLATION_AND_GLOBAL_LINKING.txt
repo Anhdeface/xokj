@@ -1,0 +1,119 @@
+================================================================================
+XOBROW DOCUMENTATION: INSTALLATION AND GLOBAL LINKING MANUAL
+================================================================================
+
+1. INSTALLATION METHODS OVERVIEW
+   XoBrow supports multiple deployment and execution methods depending on
+   your development and automation requirements:
+
+   Method                    Use Case                          Command
+   ------------------------  --------------------------------  -----------------
+   Local Symlink (npm link)  Local development, hot updates    npm run link
+   Local Global Install      Fixed local CLI snapshot          npm i -g ./packages/xobrow
+   Workspace NPM Scripts     CI/CD and contained monorepo runs npm run xb -- check ...
+   Remote NPX / Global       Published registry deployment     npx xobrow check ...
+
+2. HOW "npm link" OPERATES (INTERNAL MECHANICS)
+   The `npm link` mechanism provides a live symbolic link between your local
+   repository workspace and the system-wide global binary directory.
+
+   Step-by-Step Internal Operation:
+   1. Package Inspection:
+      npm inspects `packages/xobrow/package.json` and parses the `bin` map:
+        "bin": {
+          "xobrow": "./bin/xobrow.js",
+          "xb": "./bin/xobrow.js"
+        }
+   2. Global Node Modules Symlink:
+      npm creates a symbolic link in the global node_modules directory
+      (e.g., `~/.nvm/versions/node/v20.x/lib/node_modules/xobrow` or
+      `~/.local/share/mise/installs/node/...`) that points directly to the
+      physical source directory `/path/to/xokj/packages/xobrow`.
+   3. Binary Shim / Executable Symlink Creation:
+      npm creates executable symlinks or binary wrapper shims for `xobrow`
+      and `xb` inside your system's global binary search path (PATH).
+   4. Live Synchronization (Hot-Update):
+      Because the registration is a symbolic link rather than a file copy,
+      any changes compiled into `packages/xobrow/dist/` are immediately
+      reflected when invoking `xb` or `xobrow` from any terminal directory,
+      eliminating the need to re-link after modifying code.
+
+3. STEP-BY-STEP SETUP GUIDE (FROM A FRESH REPOSITORY CLONE)
+
+   Step 1: Clone the Monorepo
+     git clone <repository_url>
+     cd xokj
+
+   Step 2: Install Workspace Dependencies
+     npm install
+
+   Step 3: Compile TypeScript Code
+     Ensure the XoBrow package has its compiled JavaScript artifacts:
+     npm run --prefix packages/xobrow build
+     (Or use the root script: npm run xobrow:build)
+
+   Step 4: Execute the Global Link Command
+     From the root repository directory:
+     npm run link
+
+     Alternatively, you can link directly from within the package directory:
+     cd packages/xobrow
+     npm link
+     cd ../..
+
+   Step 5: Verify Global Availability
+     Open a new terminal window or navigate to an arbitrary folder (e.g. $HOME)
+     and test the executables:
+     xb --version
+     xobrow --help
+
+4. UNLINKING AND REMOVAL
+   If you wish to remove the global symlinks created by `npm link`:
+
+   From the package directory:
+     cd packages/xobrow
+     npm unlink
+     cd ../..
+
+   Or via global package uninstallation:
+     npm uninstall -g xobrow
+
+5. TROUBLESHOOTING AND PATH DIAGNOSTICS
+
+   5.1. Problem: "command not found: xb" or "command not found: xobrow"
+        Cause: The global npm binary directory is not present in your
+               shell's $PATH environment variable.
+        Resolution:
+        1. Identify the global npm prefix:
+           npm config get prefix
+        2. Check the global binary directory path:
+           - On Linux/macOS: $(npm config get prefix)/bin
+           - On Windows: $(npm config get prefix)
+        3. Append the directory to your shell configuration file
+           (~/.bashrc, ~/.zshrc, or ~/.config/fish/config.fish):
+           export PATH="$(npm config get prefix)/bin:$PATH"
+        4. Reload your shell profile:
+           source ~/.bashrc  (or source ~/.zshrc)
+
+   5.2. Problem: Using Version Managers (NVM, mise, asdf, fnm)
+        Cause: When switching Node.js versions, globally linked binaries are
+               scoped to the specific Node.js version in which `npm link` ran.
+        Resolution:
+        - If using `nvm`: Switch to your target version (`nvm use 20`) and
+          re-run `npm run link`.
+        - If using `mise`: Run `mise reshim` to regenerate active binary shims.
+        - If using `asdf`: Run `asdf reshim nodejs`.
+
+   5.3. Problem: EACCES Permission Denied on "npm link"
+        Cause: Global npm directory requires root permissions (usually occurs
+               when Node.js was installed via system package manager like apt).
+        Resolution:
+        Configure npm to use a user-owned directory for global packages:
+        mkdir -p ~/.npm-global
+        npm config set prefix '~/.npm-global'
+        export PATH=~/.npm-global/bin:$PATH
+        Then re-run `npm run link` without sudo.
+
+================================================================================
+END OF INSTALLATION AND GLOBAL LINKING MANUAL
+================================================================================

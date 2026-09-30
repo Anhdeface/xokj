@@ -1,0 +1,180 @@
+================================================================================
+XOBROW DOCUMENTATION: ARCHITECTURE AND INTERNAL SUBSYSTEMS
+================================================================================
+
+1. SUBSYSTEM INVENTORY AND SOURCE ORGANIZATION
+   The codebase of XoBrow is structured into modular layers located in
+   packages/xobrow/src/:
+
+   Path                         Responsibility
+   ---------------------------  ------------------------------------------------
+   src/cli.ts                   Commander.js CLI setup, option parsing, entry
+   src/index.ts                 Programmatic API exports (scanner, parser, rules)
+   src/types.ts                 Domain models, AST contracts, diagnostic types
+   src/engine/scanner.ts        Orchestrator for file discovery, parsing & rules
+   src/engine/glob.ts           File system resolution and glob expansion
+   src/parser/ast.ts            Babel AST parser configuration and execution
+   src/parser/metadata.ts       Regex-based Userscript metadata header extractor
+   src/parser/visitor.ts        Two-pass AST traversal and rule execution engine
+   src/rules/registry.ts        Pluggable rule registration and lookup manager
+   src/rules/security/          Security policy enforcement rules (6 rules)
+   src/rules/leaks/             Resource leak detection rules (4 rules)
+   src/rules/cdp/               CDP protocol and permission rules (5 rules)
+   src/reporter/formatter.ts    Terminal ASCII code-frame renderer with carets
+   src/reporter/json-formatter.ts Machine-readable JSON diagnostic serializer
+
+2. COMPONENT DATA FLOW PIPELINE
+
+   [Source File on Disk (Read-Only)]
+                 |
+                 v
+   +-------------------------------------------------------------------------+
+   | Phase 1: Ingestion & Metadata Parsing (src/parser/metadata.ts)          |
+   | - File read via fs.promises.readFile with 'utf-8' encoding              |
+   | - Cryptographic SHA-256 hash calculation for immutability verification  |
+   | - Header regex extracts // ==UserScript== block                         |
+   | - Directives parsed into structured ParsedMetadata object               |
+   +-------------------------------------------------------------------------+
+                 |
+                 v
+   +-------------------------------------------------------------------------+
+   | Phase 2: AST Construction (src/parser/ast.ts)                           |
+   | - Source string passed to @babel/parser                                 |
+   | - Syntax extensions enabled: TypeScript, dynamic import, modern ES      |
+   | - Permissive userscript options: allowReturnOutsideFunction,            |
+   |   allowAwaitOutsideFunction, sourceType: 'unambiguous'                  |
+   +-------------------------------------------------------------------------+
+                 |
+                 v
+   +-------------------------------------------------------------------------+
+   | Phase 3: Rule Context Creation (src/types.ts)                           |
+   | - Instantiates RuleContext with filePath, sourceCode, lines, metadata   |
+   | - Instantiates per-file NodeVisitor handlers from active rules          |
+   +-------------------------------------------------------------------------+
+                 |
+                 v
+   +-------------------------------------------------------------------------+
+   | Phase 4: Two-Pass AST Visitor Execution (src/parser/visitor.ts)         |
+   | - Pass 1: Depth-first traversal invoking node-specific visitors         |
+   |   (CallExpression, AssignmentExpression, WhileStatement, etc.)          |
+   | - Pass 2: Lifecycle Reconciliation invoking postCheck() hooks on all    |
+   |   resource leak and lifecycle rules                                     |
+   +-------------------------------------------------------------------------+
+                 |
+                 v
+   +-------------------------------------------------------------------------+
+   | Phase 5: Diagnostic Aggregation & Reporting (src/reporter/)             |
+   | - Diagnostic objects collected and sorted by (line, column) coordinates |
+   | - Formatted via Stylish ASCII code frames or JSON serialized output     |
+   | - Process terminates with deterministic exit code (0, 1, or 2)          |
+   +-------------------------------------------------------------------------+
+
+3. AST PARSER CONFIGURATION (src/parser/ast.ts)
+   Userscripts execute in unique runtime environments (isolated sandbox,
+   page context, or Web Worker contexts). Many userscripts utilize top-level
+   returns or top-level await outside standard module wrappers.
+
+   To accommodate userscript syntax idioms while enforcing standard AST
+   traversal, the Babel parser is initialized with the following flags:
+
+   Parser Option                 Value          Rationale
+   ----------------------------  -------------  --------------------------------
+   sourceType                    'unambiguous'  Auto-detects ESM modules or
+                                                script contexts.
+   allowReturnOutsideFunction    true           Permits early script exit via
+                                                top-level return in userscripts.
+   allowAwaitOutsideFunction     true           Permits top-level await in modern
+                                                userscripts.
+   plugins                       [              Enables complete parsing support
+                                   'typescript', for TypeScript userscripts,
+                                   'dynamicImport', class properties, and
+                                   'importMeta',  nullish coalescing/optional
+                                   'classProperties' chaining syntax.
+                                 ]
+
+4. USERSCRIPT METADATA EXTRACTION (src/parser/metadata.ts)
+   Before AST processing, the metadata extraction engine identifies the
+   Userscript header block defined between:
+     // ==UserScript==
+     // ... directives ...
+     // ==/UserScript==
+
+   Extracted directives are structured into a `ParsedMetadata` interface:
+   - grants: Array of string tokens from `@grant` (e.g. ['none'], ['GM_cdp']).
+   - cdpDomains: Extracted from `@cdp Domain.method` or `@grant cdp:Domain.*`.
+   - cdpMethods: Extracted specific methods permitted by header declarations.
+   - matchPatterns / includes / excludes: Target URL matching specifications.
+   - runAt: Execution lifecycle timing ('document-start', 'document-end', 'document-idle').
+
+   If no header block is present, `hasHeader` is marked `false`, and default
+   fallback metadata is supplied to the rule context.
+
+5. TWO-PASS VISITOR ARCHITECTURE (src/parser/visitor.ts)
+   Static analysis tools that evaluate single AST nodes in isolation cannot
+   accurately detect resource leaks (such as missing `removeEventListener`
+   or un-cleared `setInterval`).
+
+   XoBrow resolves this through a deterministic Two-Pass Visitor model:
+
+   5.1. Pass 1: Per-Node AST Traversal
+        The visitor recursively traverses every node of the AST. Each active
+        rule's visitor receives the node, its parent node, and the ancestor stack:
+        - Rules identify immediate violations (e.g., direct calls to `eval()`,
+          assignments to `.innerHTML`, calls to invalid CDP domains).
+        - Resource rules populate internal tracking tables with registered
+          event listeners, interval timers, CDP subscriptions, and loop scopes.
+
+   5.2. Pass 2: postCheck() Lifecycle Reconciliation
+        After the entire AST tree has been visited, `visitor.ts` triggers the
+        `postCheck()` hook for every rule:
+        - `leak-uncleaned-event-listener`: Compares registered event listener
+          targets and event names against identified `removeEventListener`
+          calls, `{ once: true }` configurations, and `AbortSignal` controllers.
+          Any un-cleared listener without cleanup is reported.
+        - `leak-lingering-interval`: Verifies whether the variable or property
+          storing the returned timer ID from `setInterval()` is subsequently
+          passed to a `clearInterval()` invocation within reachable scopes.
+        - `leak-unclosed-cdp-listener`: Reconciles `cdp.on()` subscriptions
+          against `cdp.off()`, unsubscribe callback calls, or teardown blocks.
+        - `leak-unbounded-async-loop`: Evaluates `while (true)` or `for (;;)`
+          loops containing CDP commands to verify if a sleep delay (e.g.,
+          `await sleep(ms)`), conditional `break`, `return`, or `throw` exists.
+
+6. DIAGNOSTIC FORMATTER AND CODE FRAME ENGINE (src/reporter/formatter.ts)
+   When violations occur, the formatter generates standard compiler-grade
+   error displays:
+
+   Example Terminal Output:
+   -----------------------------------------------------------------------------
+   error[sec-no-eval]: Direct call to eval() is strictly prohibited.
+     --> /path/to/script.user.js:14:3
+      |
+   13 |   // Process dynamic payload
+   14 |   eval(payload);
+      |   ^^^^
+   15 | })();
+      |
+     = suggestion: Refactor dynamic code evaluation using JSON.parse(), static
+                   functions, or an object lookup dictionary.
+   -----------------------------------------------------------------------------
+
+   Formatting Mechanics:
+   - Line numbers: Displayed in a right-aligned vertical gutter.
+   - Context lines: 1 preceding line and 1 succeeding line provide local context.
+   - Caret Pointers (^^^^): Underline the exact starting column and width of
+     the offending token based on AST location coordinates.
+   - Suggestions: Prefixed with `= suggestion:` to guide developers on remediation.
+   - ANSI Coloring: Uses picocolors for red (errors), yellow (warnings),
+     dim gutters, and bold file headers.
+
+7. PERFORMANCE AND COMPLEXITY PROFILE
+   - Parsing: $O(N)$ where $N$ is the number of characters in the source file.
+   - AST Traversal: $O(V)$ where $V$ is the total count of AST nodes.
+   - Reconciliation: $O(L)$ where $L$ is the number of registered listeners
+     or timers (typically < 100 per script).
+   - Total Memory: Linear $O(N)$ memory footprint, immediately released upon
+     completion of each file scan.
+
+================================================================================
+END OF ARCHITECTURE AND INTERNALS
+================================================================================

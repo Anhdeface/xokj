@@ -1,0 +1,164 @@
+================================================================================
+XOBROW DOCUMENTATION: CLI USAGE AND INTEGRATION MANUAL
+================================================================================
+
+1. COMMAND SYNTAX
+   The XoBrow CLI is invoked using either the primary executable name "xobrow"
+   or the abbreviated alias "xb":
+
+   Syntax:
+     xobrow check [options] [patterns...]
+     xb check [options] [patterns...]
+
+   Direct Binary Invocation:
+     node ./packages/xobrow/bin/xobrow.js check [options] [patterns...]
+     node ./packages/xobrow/bin/xb.js check [options] [patterns...]
+
+   NPM Workspace Invocation:
+     npm run xb -- check [options] [patterns...]
+     npm run xobrow -- check [options] [patterns...]
+
+2. COMMAND-LINE OPTIONS REFERENCE
+
+   Option Flag            Arguments          Default     Description
+   ---------------------  -----------------  ----------  -----------------------
+   -s, --strict           (none)             false       Elevate all warnings to
+                                                         errors, causing exit
+                                                         code 1 if warnings occur.
+
+   -f, --format           stylish | json     stylish     Select diagnostic output
+                                                         format. "stylish" prints
+                                                         ASCII code frames; "json"
+                                                         emits structured JSON.
+
+   -q, --quiet            (none)             false       Suppress passing messages
+                                                         and warning diagnostics.
+                                                         Only errors are printed.
+
+   -v, --version          (none)             (none)      Print the current semver
+                                                         version of XoBrow.
+
+   -h, --help             (none)             (none)      Print command-line help
+                                                         and flag documentation.
+
+3. TARGET PATH AND GLOB RESOLUTION
+   XoBrow supports single files, directories, and recursive glob patterns.
+
+   3.1. Single File Scanning:
+        xb check ./src/automation.user.js
+
+   3.2. Directory Scanning (Recursive Ingestion):
+        xb check ./scripts/
+        When a directory path is supplied, XoBrow recursively discovers all
+        files ending with .js, .user.js, .mjs, .cjs, and .ts.
+
+   3.3. Glob Pattern Scanning:
+        xb check "scripts/**/*.user.js"
+        xb check "modules/**/*.{js,ts}"
+
+        IMPORTANT: Always enclose glob patterns in quotes ("...") in your
+        shell to prevent the operating system shell from prematurely expanding
+        the glob string before XoBrow receives it.
+
+   3.4. Multiple Target Arguments:
+        xb check file1.js file2.js "tests/fixtures/*.js"
+
+4. PROCESS EXIT CODE PROTOCOL
+   XoBrow returns standard UNIX exit codes suitable for automated validation
+   in CI/CD pipelines:
+
+   Exit Code  Condition              Description
+   ---------  ---------------------  -------------------------------------------
+   0          CLEAN PASS             No error violations were detected (and zero
+                                     warnings were detected if --strict is on).
+
+   1          RULE VIOLATION         One or more error-level violations were
+                                     detected, or warning-level violations were
+                                     detected with the --strict flag enabled.
+
+   2          OPERATIONAL ERROR      An invalid CLI option was provided, a
+                                     specified target file does not exist, an
+                                     unreadable file permission was encountered,
+                                     or a glob pattern returned zero matches.
+
+5. JSON OUTPUT SCHEMA SPECIFICATION
+   When invoked with `-f json` or `--format json`, XoBrow outputs a JSON array
+   to stdout containing structured diagnostics for every analyzed file.
+
+   Schema Definition:
+   [
+     {
+       "filePath": string,           // Absolute or normalized file path
+       "diagnostics": [
+         {
+           "ruleId": string,         // e.g. "sec-no-eval", "leak-lingering-interval"
+           "category": string,       // "security" | "resource-leak" | "cdp-integrity"
+           "severity": string,       // "error" | "warning" | "info"
+           "message": string,        // Diagnostic description
+           "location": {
+             "line": number,         // 1-indexed line start
+             "column": number,       // 1-indexed column start
+             "endLine": number,      // 1-indexed line end
+             "endColumn": number     // 1-indexed column end
+           },
+           "suggestion": string,     // Remediation guidance
+           "codeSnippet": string     // Optional extracted source token
+         }
+       ],
+       "errorCount": number,         // Total errors in file
+       "warningCount": number,       // Total warnings in file
+       "hasErrors": boolean,
+       "hasWarnings": boolean
+     }
+   ]
+
+6. CONTINUOUS INTEGRATION (CI/CD) INTEGRATION RECIPES
+
+   6.1. GitHub Actions Workflow (.github/workflows/xobrow-audit.yml):
+   -----------------------------------------------------------------------------
+   name: Userscript Security Audit
+
+   on:
+     push:
+       branches: [ main, master ]
+     pull_request:
+       branches: [ main, master ]
+
+   jobs:
+     xobrow-audit:
+       runs-on: ubuntu-latest
+       steps:
+         - name: Checkout Source Code
+           uses: actions/checkout@v4
+
+         - name: Setup Node.js Environment
+           uses: actions/setup-node@v4
+           with:
+             node-version: '20'
+             cache: 'npm'
+
+         - name: Install Dependencies
+           run: npm ci
+
+         - name: Execute XoBrow Security & Leak Audit
+           run: npx xobrow check --strict "scripts/**/*.user.js"
+   -----------------------------------------------------------------------------
+
+   6.2. Git Pre-Commit Hook (.git/hooks/pre-commit):
+   -----------------------------------------------------------------------------
+   #!/usr/bin/env bash
+   set -e
+
+   echo "Running XoBrow userscript pre-flight audit..."
+   STAGED_SCRIPTS=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(user\.js|js|ts)$' || true)
+
+   if [ -n "$STAGED_SCRIPTS" ]; then
+     npx xobrow check --strict $STAGED_SCRIPTS
+   fi
+
+   echo "XoBrow audit passed."
+   -----------------------------------------------------------------------------
+
+================================================================================
+END OF CLI USAGE AND INTEGRATION MANUAL
+================================================================================

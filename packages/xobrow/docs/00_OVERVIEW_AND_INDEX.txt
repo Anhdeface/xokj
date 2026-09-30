@@ -1,0 +1,121 @@
+================================================================================
+XOBROW DOCUMENTATION: OVERVIEW AND SYSTEM INDEX
+================================================================================
+
+1. SYSTEM IDENTIFICATION
+   Name: XoBrow (Executable aliases: "xobrow", "xb")
+   Package: packages/xobrow
+   Target Environment: Node.js (>= 18.0.0), ECMAScript Modules (ESM)
+   Primary Target: Userscripts authored for the xokj Chromium CDP engine
+
+2. PURPOSE AND DESIGN OBJECTIVES
+   XoBrow is a dedicated static analysis and security auditing CLI tool. Its
+   purpose is to inspect JavaScript and TypeScript userscripts prior to
+   execution in browser environments possessing Chrome DevTools Protocol (CDP)
+   bridge capabilities.
+
+   Design constraints and operational principles:
+   - Static Analysis Only: Scripts are analyzed solely via Abstract Syntax Tree
+     (AST) parsing. No user code is executed, preventing arbitrary execution
+     hazards during analysis.
+   - Zero Code Mutation (Read-Only File Operations): XoBrow strictly analyzes
+     and reports. It does not rewrite, format, or auto-fix user source code.
+     Source files remain byte-for-byte identical before and after scanning.
+   - Compiler-Grade Diagnostic Reporting: Violations are reported with exact
+     1-indexed line and column coordinates, ASCII code frames containing
+     gutter numbering, token pointer carets (^^^^), rule identifiers, and
+     explicit remediation instructions.
+   - Deterministic Exit Codes: The tool outputs predictable exit codes (0 for
+     clean scripts, 1 for rule violations, 2 for operational/syntax errors)
+     for seamless integration into CI/CD pipelines and automated pre-flight
+     checks.
+
+3. DOCUMENTATION STRUCTURE
+   This documentation suite is partitioned into dedicated plain text files
+   located within packages/xobrow/docs/:
+
+   File Name                           Description
+   ---------------------------------   -----------------------------------------
+   00_OVERVIEW_AND_INDEX.txt           System overview, architecture summary,
+                                       and master index (this document).
+
+   01_ARCHITECTURE_AND_INTERNALS.txt   In-depth technical architecture, Babel
+                                       AST parsing pipeline, two-pass visitor
+                                       lifecycle reconciliation, rule registry,
+                                       and diagnostic formatting engine.
+
+   02_CLI_USAGE_AND_INTEGRATION.txt    CLI reference manual, commands, option
+                                       flags, glob resolution, exit code specs,
+                                       JSON output schema, and CI/CD setup.
+
+   03_INSTALLATION_AND_GLOBAL_LINKING.txt Installation methods, npm link mechanics,
+                                       global binary registration, PATH
+                                       troubleshooting, and development workflows.
+
+   04_RULES_REFERENCE.txt              Exhaustive technical catalog of all 15
+                                       static analysis rules across Security,
+                                       Resource Leak, and CDP Integrity domains.
+
+4. COMPONENT ARCHITECTURE SUMMARY
+
+   +-----------------------------------------------------------------------+
+   | CLI Layer (bin/xobrow.js, src/cli.ts)                                 |
+   | Argument parsing, option validation, glob pattern expansion           |
+   +-----------------------------------------------------------------------+
+                                      |
+                                      v
+   +-----------------------------------------------------------------------+
+   | Scanner Engine (src/engine/scanner.ts, src/engine/glob.ts)            |
+   | Read-only file ingestion, error aggregation, exit code determination  |
+   +-----------------------------------------------------------------------+
+                                      |
+                  +-------------------+-------------------+
+                  |                                       |
+                  v                                       v
+   +------------------------------+       +-------------------------------+
+   | Metadata Parser              |       | AST Parser Engine             |
+   | (src/parser/metadata.ts)     |       | (src/parser/ast.ts)           |
+   | Extracts // ==UserScript==   |       | Babel parser with TS, async,  |
+   | header directives (@grant,   |       | top-level await/return support|
+   | @cdp, @match, @run-at)       |       +-------------------------------+
+   +------------------------------+                       |
+                  |                                       |
+                  +-------------------+-------------------+
+                                      |
+                                      v
+   +-----------------------------------------------------------------------+
+   | Two-Pass Visitor Framework (src/parser/visitor.ts)                    |
+   | Pass 1: Per-node traversal across AST nodes                           |
+   | Pass 2: postCheck() resource lifecycle reconciliation hooks           |
+   +-----------------------------------------------------------------------+
+                                      |
+                  +-------------------+-------------------+
+                  |                   |                   |
+                  v                   v                   v
+   +--------------------+ +--------------------+ +--------------------+
+   | Security Rules     | | Resource Leaks     | | CDP Integrity      |
+   | 6 Active Rules     | | 4 Active Rules     | | 5 Active Rules     |
+   | (src/rules/sec/*)  | | (src/rules/leak/*) | | (src/rules/cdp/*)  |
+   +--------------------+ +--------------------+ +--------------------+
+                                      |
+                                      v
+   +-----------------------------------------------------------------------+
+   | Diagnostic Reporter (src/reporter/formatter.ts, json-formatter.ts)    |
+   | ASCII code frames, terminal coloring, caret pointers, JSON schema    |
+   +-----------------------------------------------------------------------+
+                                      |
+                                      v
+   +-----------------------------------------------------------------------+
+   | Process Exit Protocol: 0 (Clean), 1 (Violation), 2 (Operational Error) |
+   +-----------------------------------------------------------------------+
+
+5. MINIMUM SYSTEM REQUIREMENTS
+   - Runtime: Node.js version 18.0.0 or higher.
+   - Operating System: Linux, macOS, or Windows (WSL / PowerShell / cmd).
+   - Package Manager: npm (>= 8.0.0), pnpm, or yarn.
+   - Memory Footprint: Standard AST parse allocations (< 64MB for typical
+     userscript files under 50,000 lines).
+
+================================================================================
+END OF OVERVIEW AND INDEX
+================================================================================
