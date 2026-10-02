@@ -9,8 +9,8 @@
  *
  * Examples:
  *   npm run bump patch --xokj       # Bumps xokj extension (e.g. 0.3.0 -> 0.3.1)
- *   npm run bump minor --xobrow     # Bumps xobrow CLI (e.g. 0.2.0 -> 0.3.0)
- *   npm run bump patch --xokj --tag # Bumps xokj and creates git commit + tag
+ *   npm run bump minor --xokj --tag # Bumps xokj and creates git commit + tag
+ *   npm run bump patch --xobrow     # Bumps xobrow CLI package without creating git release tag
  */
 
 import fs from 'node:fs';
@@ -69,14 +69,14 @@ function printUsageAndExit(errorMessage, exitCode = 1) {
   console.log('XOKJ Monorepo Version Manager — Usage Guide');
   console.log('================================================================');
   console.log('You must explicitly choose EITHER xokj OR xobrow to bump.');
-  console.log('Bumping both packages simultaneously is strictly forbidden.\n');
+  console.log('Note: Release git tags (--tag) are exclusively reserved for xokj.\n');
   console.log('Usage:');
-  console.log('  npm run bump <patch|minor|major|version> <--xokj | --xobrow> [--tag]');
-  console.log('  npm run bump <xokj | xobrow> <patch|minor|major|version> [--tag]\n');
+  console.log('  npm run bump <patch|minor|major|version> --xokj [--tag]');
+  console.log('  npm run bump <patch|minor|major|version> --xobrow\n');
   console.log('Examples:');
   console.log('  npm run bump patch --xokj       # Bump xokj (extension)');
-  console.log('  npm run bump minor --xobrow     # Bump xobrow (CLI package)');
-  console.log('  npm run bump minor --xokj --tag # Bump xokj & create git commit/tag');
+  console.log('  npm run bump minor --xokj --tag # Bump xokj & create git release tag (v*)');
+  console.log('  npm run bump minor --xobrow     # Bump xobrow (CLI package without tag)');
   console.log('================================================================\n');
   process.exit(exitCode);
 }
@@ -98,6 +98,10 @@ function main() {
 
   if (isXokjFlag && isXobrowFlag) {
     printUsageAndExit('Cannot bump both --xokj and --xobrow simultaneously. Please bump one component at a time.');
+  }
+
+  if (isXobrowFlag && createTag) {
+    printUsageAndExit('Git release tags (--tag) are not permitted for xobrow. Release tags are strictly reserved for xokj Extension (v*).');
   }
 
   // Find the semver target (skip flag words and target words)
@@ -129,7 +133,6 @@ function main() {
     updateJsonFile(xobrowPkgPath, pkg => {
       pkg.version = toVer;
     });
-    tagVersion = `xobrow-v${toVer}`;
     filesToStage = ['packages/xobrow/package.json'];
   }
 
@@ -148,10 +151,10 @@ function main() {
   console.log('----------------------------------------------------------------');
   console.log(`Updated ${isXokjFlag ? 'package.json' : 'packages/xobrow/package.json'} and synchronized package-lock.json successfully.`);
 
-  if (createTag) {
+  if (createTag && isXokjFlag) {
     try {
       execSync(`git add ${filesToStage.join(' ')}`, { cwd: rootDir, stdio: 'inherit' });
-      execSync(`git commit -m "chore(release): bump ${isXokjFlag ? 'xokj' : 'xobrow'} to ${toVer}"`, { cwd: rootDir, stdio: 'inherit' });
+      execSync(`git commit -m "chore(release): bump xokj to ${toVer}"`, { cwd: rootDir, stdio: 'inherit' });
       execSync(`git tag -a ${tagVersion} -m "Release ${tagVersion}"`, { cwd: rootDir, stdio: 'inherit' });
       console.log(`Created Git commit and tag: ${tagVersion}`);
       console.log(`Run: git push origin main --tags`);
