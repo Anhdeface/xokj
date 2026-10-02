@@ -1,6 +1,6 @@
 {
   "name": "xobrow",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Standalone CLI static analysis and security audit tool for userscripts targeting xokj Chromium CDP engine",
   "type": "module",
   "bin": {
