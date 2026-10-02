@@ -356,15 +356,50 @@ export class CdpClient implements ICdpClient {
   }
 
   /**
-   * Dispatches incoming event to all matching subscribers.
+   * Dispatches incoming event to all matching subscribers (exact match, domain wildcard, and global wildcard).
    */
   private dispatchEvent(method: string, params: unknown): void {
-    const listeners = this.eventListeners.get(method);
-    if (!listeners || listeners.size === 0) return;
+    if (!method || typeof method !== 'string') return;
 
-    for (const handler of Array.from(listeners)) {
+    const matchedHandlers: { handler: (params: any, method?: string) => void; isWildcard: boolean }[] = [];
+
+    // 1. Exact event name match (e.g. 'Network.requestWillBeSent')
+    const exact = this.eventListeners.get(method);
+    if (exact && exact.size > 0) {
+      for (const h of exact) {
+        matchedHandlers.push({ handler: h, isWildcard: false });
+      }
+    }
+
+    // 2. Domain wildcard match (e.g. 'Network.*')
+    const dotIndex = method.indexOf('.');
+    if (dotIndex !== -1) {
+      const domainWildcard = method.slice(0, dotIndex) + '.*';
+      const domainHandlers = this.eventListeners.get(domainWildcard);
+      if (domainHandlers && domainHandlers.size > 0) {
+        for (const h of domainHandlers) {
+          matchedHandlers.push({ handler: h, isWildcard: true });
+        }
+      }
+    }
+
+    // 3. Global wildcard match ('*')
+    const globalHandlers = this.eventListeners.get('*');
+    if (globalHandlers && globalHandlers.size > 0) {
+      for (const h of globalHandlers) {
+        matchedHandlers.push({ handler: h, isWildcard: true });
+      }
+    }
+
+    if (matchedHandlers.length === 0) return;
+
+    for (const { handler, isWildcard } of matchedHandlers) {
       try {
-        handler(params);
+        if (isWildcard) {
+          handler(params, method);
+        } else {
+          handler(params);
+        }
       } catch (err) {
         console.error(`[XOKJ CDP SDK] Uncaught exception in event listener for '${method}':`, err);
       }

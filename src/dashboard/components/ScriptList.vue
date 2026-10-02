@@ -89,6 +89,8 @@ defineEmits<{
   (e: 'update:activeFilter', val: 'all' | 'enabled' | 'disabled' | 'cdp'): void;
   (e: 'select', id: string): void;
   (e: 'toggle', id: string): void;
+  (e: 'create'): void;
+  (e: 'delete', id: string): void;
 }>();
 </script>
 

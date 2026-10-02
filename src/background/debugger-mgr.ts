@@ -5,6 +5,9 @@
 import {
   DebuggerSessionStatus,
   TabSessionState,
+  TabSessionRecord,
+  AttachOptions,
+  CdpLifecyclePayload,
   CdpRpcLifecycleMessage,
   DevToolsConflictError,
   CdpDeclaration,
@@ -14,9 +17,18 @@ import {
   scriptRequiresCdp
 } from '@/shared/types';
 import { isRestrictedUrl, matchesAny } from '@/shared/match-pattern';
-import { getScriptList, getSettings, AsyncMutex, DEFAULT_SETTINGS, DEFAULT_SCRIPTS } from '@/shared/storage';
+import {
+  getScriptList,
+  getSettings,
+  saveTabSession,
+  deleteTabSession,
+  AsyncMutex,
+  DEFAULT_SETTINGS,
+  DEFAULT_SCRIPTS
+} from '@/shared/storage';
 
 export { scriptRequiresCdp };
+export type { AttachOptions, CdpLifecyclePayload, TabSessionRecord };
 
 export interface TabSessionInternal {
   tabId: number;
@@ -80,7 +92,6 @@ export function aggregateCdpDeclarations(scripts: ScriptRecord[]): CdpDeclaratio
 
 export class TabDebuggerManager {
   private sessions = new Map<number, TabSessionInternal>();
-  private sessionStorageMutex = new AsyncMutex();
   private lifecycleListeners = new Set<LifecycleListener>();
   private inflightTracker: InflightRequestTracker | null = null;
   private initialized = false;
@@ -259,29 +270,47 @@ export class TabDebuggerManager {
    * Attaches debugger to tab with re-entrancy protection, throwing on error.
    * If session is in CONFLICT status and force !== true, rejects with DevToolsConflictError (code 1001).
    */
+  async attachTab(tabId: number, options: AttachOptions): Promise<TabSessionRecord>;
   async attachTab(
     tabId: number,
     urlOrVersionOrForce?: string | boolean,
     forceOrProtocol?: boolean | string,
+    protocolVersion?: string
+  ): Promise<void>;
+  async attachTab(
+    tabId: number,
+    urlOrVersionOrForceOrOptions?: string | boolean | AttachOptions,
+    forceOrProtocol?: boolean | string,
     protocolVersion = '1.3'
-  ): Promise<void> {
+  ): Promise<any> {
+    const isOptionsObject =
+      typeof urlOrVersionOrForceOrOptions === 'object' &&
+      urlOrVersionOrForceOrOptions !== null;
+
     let url: string | undefined;
     let actualForce = false;
     let actualVersion = protocolVersion;
 
-    if (typeof urlOrVersionOrForce === 'boolean') {
-      actualForce = urlOrVersionOrForce;
+    if (isOptionsObject) {
+      const opts = urlOrVersionOrForceOrOptions as AttachOptions;
+      url = opts.url;
+      actualForce = !!opts.force;
+      if (opts.protocolVersion) {
+        actualVersion = opts.protocolVersion;
+      }
+    } else if (typeof urlOrVersionOrForceOrOptions === 'boolean') {
+      actualForce = urlOrVersionOrForceOrOptions;
       if (typeof forceOrProtocol === 'string') {
         actualVersion = forceOrProtocol;
       }
-    } else if (typeof urlOrVersionOrForce === 'string') {
-      if (/^\d+(\.\d+)*$/.test(urlOrVersionOrForce)) {
-        actualVersion = urlOrVersionOrForce;
+    } else if (typeof urlOrVersionOrForceOrOptions === 'string') {
+      if (/^\d+(\.\d+)*$/.test(urlOrVersionOrForceOrOptions)) {
+        actualVersion = urlOrVersionOrForceOrOptions;
         if (typeof forceOrProtocol === 'boolean') {
           actualForce = forceOrProtocol;
         }
       } else {
-        url = urlOrVersionOrForce;
+        url = urlOrVersionOrForceOrOptions;
         if (typeof forceOrProtocol === 'boolean') {
           actualForce = forceOrProtocol;
         } else if (typeof forceOrProtocol === 'string') {
@@ -302,7 +331,7 @@ export class TabDebuggerManager {
     }
 
     if (session.status === 'ATTACHED' && !session.operationLock) {
-      return;
+      return isOptionsObject ? this.getSession(tabId)! : undefined;
     }
 
     if (session.status === 'CONFLICT' && !session.operationLock && !actualForce) {
@@ -321,7 +350,7 @@ export class TabDebuggerManager {
     ) {
       await session.operationLock;
       if ((session.status as DebuggerSessionStatus) === 'ATTACHED') {
-        return;
+        return isOptionsObject ? this.getSession(tabId)! : undefined;
       }
     }
 
@@ -341,7 +370,7 @@ export class TabDebuggerManager {
       }
 
       if ((session.status as DebuggerSessionStatus) === 'ATTACHED') {
-        return;
+        return isOptionsObject ? this.getSession(tabId)! : undefined;
       }
       if ((session.status as DebuggerSessionStatus) === 'CONFLICT' && !actualForce) {
         throw new DevToolsConflictError(
@@ -401,11 +430,11 @@ export class TabDebuggerManager {
           this.broadcastLifecycle(tabId, 'ATTACHED');
         } catch (err: any) {
           const errorMsg = err?.message || String(err);
-          if (
-            errorMsg.includes('Another debugger is already attached') ||
-            errorMsg.includes('DevTools') ||
-            errorMsg.includes('attached to the tab')
-          ) {
+          const isConflictError =
+            /another debugger|already attached|canceled_by_user|devtools|attached to the tab/i.test(
+              errorMsg
+            );
+          if (isConflictError) {
             session.status = 'CONFLICT';
             session.attached = false;
             session.conflictDetected = true;
@@ -426,6 +455,7 @@ export class TabDebuggerManager {
       };
 
       await attachAction();
+      return isOptionsObject ? this.getSession(tabId)! : undefined;
     } finally {
       releaseLock();
       if (session.operationLock === attachLock) {
@@ -449,10 +479,18 @@ export class TabDebuggerManager {
    */
   async detachTab(
     tabId: number,
-    targetStatus: DebuggerSessionStatus = 'DETACHED'
+    targetStatusOrReason: DebuggerSessionStatus | string = 'DETACHED'
   ): Promise<void> {
     const session = this.sessions.get(tabId);
     if (!session) return;
+
+    const targetStatus: DebuggerSessionStatus =
+      targetStatusOrReason === 'IDLE' ? 'IDLE' : 'DETACHED';
+    const customReason =
+      targetStatusOrReason === 'IDLE' || targetStatusOrReason === 'DETACHED'
+        ? undefined
+        : targetStatusOrReason;
+    const reasonText = customReason || targetStatus.toLowerCase();
 
     if (session.status === targetStatus && !session.attached && !session.operationLock) {
       return;
@@ -469,7 +507,7 @@ export class TabDebuggerManager {
       }
       session.updatedAt = Date.now();
       await this.persistSession(session);
-      this.broadcastLifecycle(tabId, targetStatus === 'IDLE' ? 'DETACHED' : targetStatus);
+      this.broadcastLifecycle(tabId, targetStatus === 'IDLE' ? 'DETACHED' : targetStatus, customReason);
       return;
     }
 
@@ -521,8 +559,8 @@ export class TabDebuggerManager {
           if (this.inflightTracker) {
             const error = {
               code: 1002,
-              message: `Debugger detached from tab: ${targetStatus.toLowerCase()}`,
-              data: { reason: targetStatus.toLowerCase() }
+              message: `Debugger detached from tab: ${reasonText}`,
+              data: { reason: reasonText }
             };
             if (typeof this.inflightTracker.rejectPendingRequestsForTab === 'function') {
               this.inflightTracker.rejectPendingRequestsForTab(tabId, error);
@@ -532,7 +570,7 @@ export class TabDebuggerManager {
           }
 
           await this.persistSession(session);
-          this.broadcastLifecycle(tabId, targetStatus === 'IDLE' ? 'DETACHED' : targetStatus);
+          this.broadcastLifecycle(tabId, targetStatus === 'IDLE' ? 'DETACHED' : targetStatus, customReason);
         }
       };
 
@@ -655,7 +693,7 @@ export class TabDebuggerManager {
   /**
    * Reconnects after a DevTools conflict.
    */
-  async reconnect(tabId: number): Promise<ReconnectCdpResponse> {
+  async reconnect(tabId: number): Promise<ReconnectCdpResponse & TabSessionRecord> {
     let session = this.sessions.get(tabId);
     if (!session) {
       session = this.createSession(tabId);
@@ -669,15 +707,42 @@ export class TabDebuggerManager {
     const success = await this.attach(tabId, settings.debuggerProtocolVersion || '1.3', true);
 
     if (!success) {
-      return {
-        success: false,
-        error: session.conflictReason || session.lastError || 'Failed to reconnect debugger'
+      const reason = session.conflictReason || session.lastError || '';
+      const isConflict =
+        (session.status as DebuggerSessionStatus) === 'CONFLICT' ||
+        /DevTools|another debugger|attached to the tab|canceled_by_user|already attached/i.test(reason);
+      const errMsg = isConflict
+        ? 'DevTools is still open. Please close DevTools before reconnecting.'
+        : (reason || 'Failed to reconnect debugger');
+      if (isConflict) {
+        session.status = 'CONFLICT';
+        session.conflictDetected = true;
+        session.conflictReason = 'DevTools is still active';
+        session.attached = false;
+        await this.persistSession(session);
+      }
+      const snapshot = this.getSession(tabId) || {
+        tabId,
+        status: 'CONFLICT' as DebuggerSessionStatus,
+        attached: false,
+        activeDomains: [],
+        conflictDetected: true,
+        conflictReason: 'DevTools is still active',
+        updatedAt: Date.now()
       };
+      return Object.assign({}, snapshot, {
+        success: false,
+        error: errMsg
+      });
     }
 
     await this.initializeDeclaredDomains(tabId, session.targetUrl);
 
-    return { success: true };
+    const snapshot = this.getSession(tabId)!;
+    return Object.assign({}, snapshot, {
+      success: true,
+      session: snapshot
+    });
   }
 
   /**
@@ -843,18 +908,9 @@ export class TabDebuggerManager {
     if (typeof chrome !== 'undefined') {
       chrome.storage?.session?.remove?.([`tab_session_${tabId}`]).catch?.(() => {});
 
-      if (chrome.storage?.local?.get && chrome.storage?.local?.set) {
-        try {
-          await this.sessionStorageMutex.runExclusive(async () => {
-            const stored = await chrome.storage.local.get('tab_sessions');
-            if (stored?.tab_sessions && stored.tab_sessions[tabId] !== undefined) {
-              const updated = { ...stored.tab_sessions };
-              delete updated[tabId];
-              await chrome.storage.local.set({ tab_sessions: updated });
-            }
-          });
-        } catch {}
-      }
+      try {
+        await deleteTabSession(tabId);
+      } catch {}
     }
   }
 
@@ -1005,17 +1061,9 @@ export class TabDebuggerManager {
         } catch {}
       }
 
-      if (chrome.storage?.local?.get && chrome.storage?.local?.set) {
-        try {
-          await this.sessionStorageMutex.runExclusive(async () => {
-            if (!this.sessions.has(session.tabId)) return;
-            const stored = await chrome.storage.local.get('tab_sessions');
-            const sessions = stored.tab_sessions || {};
-            sessions[session.tabId] = snapshot;
-            await chrome.storage.local.set({ tab_sessions: sessions });
-          });
-        } catch {}
-      }
+      try {
+        await saveTabSession(snapshot);
+      } catch {}
     }
   }
 
@@ -1133,5 +1181,9 @@ export class TabDebuggerManager {
     return () => {
       this.lifecycleListeners.delete(listener);
     };
+  }
+
+  public onLifecycleEvent(listener: (event: CdpLifecyclePayload) => void): () => void {
+    return this.onLifecycle(listener);
   }
 }

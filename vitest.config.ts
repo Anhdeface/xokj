@@ -7,7 +7,18 @@ export default defineConfig({
   test: {
     environment: 'happy-dom',
     globals: true,
-    include: ['test/**/*.spec.ts', 'src/**/*.spec.ts']
+    pool: 'forks',
+    poolOptions: {
+      forks: {
+        isolate: true,
+        maxForks: 3
+      }
+    },
+    include: ['test/**/*.spec.ts', 'src/**/*.spec.ts'],
+    exclude: [
+      '**/node_modules/**',
+      '**/dist/**'
+    ]
   },
   resolve: {
     alias: {

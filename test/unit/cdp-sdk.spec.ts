@@ -182,6 +182,99 @@ describe('Feature 15: Userscript Runtime SDK (cdp-sdk.ts)', () => {
       expect(handler1).not.toHaveBeenCalled();
       expect(handler2).not.toHaveBeenCalled();
     });
+
+    it('T2.4: dispatches matching events to domain wildcard listeners (Domain.*) passing params and method', () => {
+      const netWildcardHandler = vi.fn();
+      sdk.on('Network.*', netWildcardHandler);
+
+      // Event matching Network domain
+      sdk.handleWindowMessage({
+        source: window,
+        data: {
+          type: 'CDP_RPC_EVENT',
+          method: 'Network.requestWillBeSent',
+          params: { requestId: 'net-100' }
+        }
+      } as any);
+
+      expect(netWildcardHandler).toHaveBeenCalledTimes(1);
+      expect(netWildcardHandler).toHaveBeenCalledWith({ requestId: 'net-100' }, 'Network.requestWillBeSent');
+
+      // Another event matching Network domain
+      sdk.handleWindowMessage({
+        source: window,
+        data: {
+          type: 'CDP_RPC_EVENT',
+          method: 'Network.responseReceived',
+          params: { status: 200 }
+        }
+      } as any);
+
+      expect(netWildcardHandler).toHaveBeenCalledTimes(2);
+      expect(netWildcardHandler).toHaveBeenCalledWith({ status: 200 }, 'Network.responseReceived');
+
+      // Non-matching domain event
+      sdk.handleWindowMessage({
+        source: window,
+        data: {
+          type: 'CDP_RPC_EVENT',
+          method: 'Page.loadEventFired',
+          params: { timestamp: 456 }
+        }
+      } as any);
+
+      expect(netWildcardHandler).toHaveBeenCalledTimes(2);
+    });
+
+    it('T2.5: dispatches all events to global wildcard listener (*) passing params and method', () => {
+      const globalHandler = vi.fn();
+      sdk.on('*', globalHandler);
+
+      sdk.handleWindowMessage({
+        source: window,
+        data: {
+          type: 'CDP_RPC_EVENT',
+          method: 'Page.frameNavigated',
+          params: { frame: { id: 'f1' } }
+        }
+      } as any);
+
+      sdk.handleWindowMessage({
+        source: window,
+        data: {
+          type: 'CDP_RPC_EVENT',
+          method: 'DOM.documentUpdated',
+          params: {}
+        }
+      } as any);
+
+      expect(globalHandler).toHaveBeenCalledTimes(2);
+      expect(globalHandler).toHaveBeenNthCalledWith(1, { frame: { id: 'f1' } }, 'Page.frameNavigated');
+      expect(globalHandler).toHaveBeenNthCalledWith(2, {}, 'DOM.documentUpdated');
+    });
+
+    it('T2.6: isolates listener callback exceptions so other subscribers continue executing', () => {
+      const crashingHandler = vi.fn().mockImplementation(() => {
+        throw new Error('Handler crash');
+      });
+      const healthyHandler = vi.fn();
+
+      sdk.on('Runtime.consoleAPICalled', crashingHandler);
+      sdk.on('Runtime.consoleAPICalled', healthyHandler);
+
+      sdk.handleWindowMessage({
+        source: window,
+        data: {
+          type: 'CDP_RPC_EVENT',
+          method: 'Runtime.consoleAPICalled',
+          params: { type: 'log' }
+        }
+      } as any);
+
+      expect(crashingHandler).toHaveBeenCalledTimes(1);
+      expect(healthyHandler).toHaveBeenCalledTimes(1);
+      expect(healthyHandler).toHaveBeenCalledWith({ type: 'log' });
+    });
   });
 
   describe('Tier 3: DevTools Conflict & Error Propagation', () => {

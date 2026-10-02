@@ -47,9 +47,9 @@ The core browser extension provides a userscript runtime environment capable of 
 - **Technology Stack**: Manifest V3, Vue 3, Vite, `@crxjs/vite-plugin`, CodeMirror 6, TypeScript.
 - **Key Capabilities**:
   - Bi-directional bridge between webpage execution context (MAIN world) and `chrome.debugger` backend.
-  - Native DevTools conflict detection and automatic in-flight promise rejection.
-  - Multi-phase injection scheduler (`document-start`, `document-end`, `document-idle`).
-  - Serialized local storage repository via FIFO AsyncMutex.
+  - Native DevTools conflict detection and automatic in-flight promise rejection (error code `1001`).
+  - Multi-phase injection scheduler (`document-start`, `document-end`, `document-idle`) into page MAIN world.
+  - Modular storage subsystem with FIFO AsyncMutex serialization and persistent userscript key-value storage.
   - Integrated CodeMirror 6 script management dashboard with syntax highlighting.
 - **Documentation**:
   - [Extension User Guide & Architecture (README_EXTENSION.md)](README_EXTENSION.md)
@@ -170,11 +170,20 @@ xokj/
 │   └── XOKJ_TECHNICAL_SPEC.md # Full system specification for the xokj extension
 │
 ├── src/                       # XOKJ Browser Extension source code
-│   ├── background/            # MV3 Service Worker (CDP bridge, debugger manager, injector)
+│   ├── background/            # MV3 Service Worker (modular CDP bridge, debugger manager, injector)
+│   │   ├── cdp/               # RPC router, timeout guard, broadcaster, permission guard
+│   │   ├── injector/          # Stage scheduler, MAIN world page runner, dedup tracker
+│   │   └── debugger-mgr.ts    # Authoritative tab debugger state manager
 │   ├── content/               # Content scripts, postMessage relay & sandbox
-│   ├── shared/                # Data types, metadata parser, match patterns, storage mutex
+│   │   ├── bridge/            # 4-layer validator, request manager, event relayer, storage forwarder
+│   │   ├── cdp-sdk.ts         # CdpClient SDK & GM polyfills
+│   │   └── sandbox.ts         # Sandbox runner & scope builder
+│   ├── shared/                # Data types, metadata parser, match patterns, storage subsystem
+│   │   └── storage/           # Modular storage (defaults, mutex, repos, bundle, gm-repo)
 │   ├── popup/                 # Vue 3 popup interface
-│   └── dashboard/             # Vue 3 + CodeMirror 6 management dashboard
+│   └── dashboard/             # Vue 3 + CodeMirror 6 management dashboard (modular components & composable)
+│       ├── components/        # ScriptList, ScriptEditor, MetadataPanel, ImportExportModal
+│       └── composables/       # useDashboardState reactive storage sync & CRUD
 │
 ├── packages/
 │   └── xobrow/                # XoBrow Standalone Static Analysis CLI Package

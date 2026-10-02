@@ -1,84 +1,56 @@
 /**
  * XOKJ - Asynchronous CDP RPC Bridge & Event Multiplexer
+ *
+ * Public coordinator facade delegating single-responsibility concerns to:
+ * - CdpPermissionGuard (permissions & match patterns)
+ * - TimeoutGuard (inflight command tracking & 30s timeout guards)
+ * - CdpBroadcaster (CDP_RPC_EVENT and CDP_LIFECYCLE_EVENT dispatch)
+ * - RpcRouter (request validation, anti-spoofing, error mapping)
+ * - GmStorageMessageHandler (runtime GM storage routing)
+ * - TabDebuggerManager (authoritative CDP attachment & session state)
  */
 
 import type {
   CdpRpcRequest,
   CdpRpcResponse,
-  CdpRpcEventMessage,
-  CdpRpcLifecycleMessage,
   CdpRpcError,
-  DebuggerSessionStatus,
+  CdpLifecycleStatus,
   ScriptRecord
 } from '@/shared/types';
 import { DevToolsConflictError } from '@/shared/types';
-import { isRestrictedUrl, matchesAny } from '@/shared/match-pattern';
-import { getScript, getScripts, onScriptsChanged } from '@/shared/storage';
+import { getScript } from '@/shared/storage';
+import {
+  IDebuggerManager,
+  CdpBridgeServerOptions,
+  InflightRequestEntry,
+  CdpPermissionGuard,
+  TimeoutGuard,
+  CdpBroadcaster,
+  validateRpcRequest,
+  formatInternalErrorResponse
+} from './cdp';
+import { gmStorageHandler } from './gm-handler';
 
-/**
- * Interface for optional TabDebuggerManager integration.
- */
-export interface IDebuggerManager {
-  isAttached(tabId: number): boolean;
-  attach?(tabId: number, version?: string, force?: boolean): Promise<boolean>;
-  attachTab?(
-    tabId: number,
-    urlOrVersionOrForce?: string | boolean,
-    forceOrProtocol?: boolean | string,
-    protocolVersion?: string
-  ): Promise<void>;
-  getTabStatus?(tabId: number): DebuggerSessionStatus;
-  setTabStatus?(tabId: number, status: DebuggerSessionStatus, reason?: string): void;
-}
-
-/**
- * Configuration options for CdpBridgeServer.
- */
-export interface CdpBridgeServerOptions {
-  /** Inflight request timeout in milliseconds (default: 30000) */
-  timeoutMs?: number;
-  /** CDP protocol version (default: '1.3') */
-  protocolVersion?: string;
-  /** Automatically attach debugger if not attached (default: true) */
-  autoAttach?: boolean;
-  /** Automatically start listening to Chrome events (default: false) */
-  autoStart?: boolean;
-  /** Optional TabDebuggerManager delegate */
-  debuggerManager?: IDebuggerManager;
-  /** When true, requires scriptId on all requests from tabs */
-  enforcePermissions?: boolean;
-  /** Custom script lookup override */
-  scriptResolver?: (scriptId: string) => Promise<ScriptRecord | null>;
-}
-
-/**
- * Internal tracking entry for an active CDP RPC invocation.
- */
-export interface InflightRequestEntry {
-  id: string;
-  tabId: number;
-  method: string;
-  params?: Record<string, unknown>;
-  startTime: number;
-  timer: ReturnType<typeof setTimeout>;
-  resolve: (response: CdpRpcResponse) => void;
-}
+export type { IDebuggerManager, CdpBridgeServerOptions, InflightRequestEntry };
 
 export class CdpBridgeServer {
   private readonly timeoutMs: number;
   private readonly protocolVersion: string;
   private readonly autoAttach: boolean;
   private readonly debuggerManager?: IDebuggerManager;
-  private enforcePermissions: boolean;
-  private readonly scriptResolver: (scriptId: string) => Promise<ScriptRecord | null>;
 
-  private inflightRequests = new Map<string, InflightRequestEntry>();
-  private tabRequests = new Map<number, Set<string>>();
-  private attachLocks = new Map<number, Promise<void>>();
-  private attachedTabs = new Set<number>();
+  // Submodules
+  private permissionGuard: CdpPermissionGuard;
+  private timeoutGuard: TimeoutGuard;
+  private broadcaster: CdpBroadcaster;
+
+  // State maps preserved for white-box test compatibility
+  public readonly inflightRequests: Map<string, InflightRequestEntry>;
+  public readonly tabRequests: Map<number, Set<string>>;
+  public readonly attachLocks = new Map<number, Promise<void>>();
+  public readonly attachedTabs = new Set<number>();
+
   private isListening = false;
-  private scriptCache = new Map<string, ScriptRecord>();
-  private unsubscribeScriptsChanged?: () => void;
 
   private handleMessageBound = this.handleMessage.bind(this);
   private handleDebuggerEventBound = this.handleDebuggerEvent.bind(this);
@@ -90,8 +62,16 @@ export class CdpBridgeServer {
     this.protocolVersion = options.protocolVersion ?? '1.3';
     this.autoAttach = options.autoAttach ?? true;
     this.debuggerManager = options.debuggerManager;
-    this.enforcePermissions = options.enforcePermissions ?? false;
-    this.scriptResolver = options.scriptResolver ?? getScript;
+
+    this.permissionGuard = new CdpPermissionGuard(
+      options.enforcePermissions ?? false,
+      options.scriptResolver ?? getScript
+    );
+    this.timeoutGuard = new TimeoutGuard();
+    this.broadcaster = new CdpBroadcaster();
+
+    this.inflightRequests = this.timeoutGuard.inflightRequests;
+    this.tabRequests = this.timeoutGuard.tabRequests;
 
     if (this.debuggerManager && typeof (this.debuggerManager as any).setInflightTracker === 'function') {
       (this.debuggerManager as any).setInflightTracker(this);
@@ -102,11 +82,8 @@ export class CdpBridgeServer {
     }
   }
 
-  /**
-   * Toggles permission enforcement mode.
-   */
   public setEnforcePermissions(enforce: boolean): void {
-    this.enforcePermissions = enforce;
+    this.permissionGuard.setEnforcePermissions(enforce);
   }
 
   /**
@@ -118,35 +95,15 @@ export class CdpBridgeServer {
     if (typeof chrome !== 'undefined') {
       chrome.runtime?.onMessage?.addListener?.(this.handleMessageBound);
       chrome.debugger?.onEvent?.addListener?.(this.handleDebuggerEventBound);
+      chrome.tabs?.onRemoved?.addListener?.(this.handleTabRemovedBound);
 
-      // Single Owner: Only register direct onDetach listener if running standalone without TabDebuggerManager
+      // Defensive detach listener only in standalone mode without debuggerManager
       if (!this.debuggerManager && chrome.debugger?.onDetach) {
         chrome.debugger.onDetach.addListener(this.handleDebuggerDetachBound);
       }
-
-      if (chrome.tabs?.onRemoved) {
-        chrome.tabs.onRemoved.addListener(this.handleTabRemovedBound);
-      }
     }
 
-    if (!this.unsubscribeScriptsChanged) {
-      this.unsubscribeScriptsChanged = onScriptsChanged((scripts) => {
-        this.scriptCache.clear();
-        for (const [id, script] of Object.entries(scripts)) {
-          this.scriptCache.set(id, script);
-        }
-      });
-      getScripts()
-        .then((scripts) => {
-          if (this.scriptCache.size === 0 && scripts) {
-            for (const [id, script] of Object.entries(scripts)) {
-              this.scriptCache.set(id, script);
-            }
-          }
-        })
-        .catch(() => {});
-    }
-
+    this.permissionGuard.init();
     this.isListening = true;
   }
 
@@ -155,47 +112,27 @@ export class CdpBridgeServer {
   }
 
   /**
-   * Stops listening and cancels all active in-flight commands.
+   * Teardown event listeners and drain inflight requests.
    */
   public destroy(): void {
     if (!this.isListening) return;
 
-    if (this.unsubscribeScriptsChanged) {
-      this.unsubscribeScriptsChanged();
-      this.unsubscribeScriptsChanged = undefined;
-    }
-    this.scriptCache.clear();
-
     if (typeof chrome !== 'undefined') {
       chrome.runtime?.onMessage?.removeListener?.(this.handleMessageBound);
       chrome.debugger?.onEvent?.removeListener?.(this.handleDebuggerEventBound);
+      chrome.tabs?.onRemoved?.removeListener?.(this.handleTabRemovedBound);
+
       if (!this.debuggerManager && chrome.debugger?.onDetach) {
         chrome.debugger.onDetach.removeListener(this.handleDebuggerDetachBound);
       }
-      if (chrome.tabs?.onRemoved) {
-        chrome.tabs.onRemoved.removeListener(this.handleTabRemovedBound);
-      }
     }
+
+    this.permissionGuard.destroy();
+    this.timeoutGuard.destroy();
+    this.attachLocks.clear();
+    this.attachedTabs.clear();
 
     this.isListening = false;
-
-    for (const [id, entry] of this.inflightRequests.entries()) {
-      clearTimeout(entry.timer);
-      entry.resolve({
-        type: 'CDP_RPC_RESPONSE',
-        id,
-        success: false,
-        error: {
-          code: -32000,
-          message: 'CdpBridgeServer stopped: pending request cancelled'
-        }
-      });
-    }
-
-    this.inflightRequests.clear();
-    this.tabRequests.clear();
-    this.attachedTabs.clear();
-    this.attachLocks.clear();
   }
 
   public stop(): void {
@@ -204,14 +141,20 @@ export class CdpBridgeServer {
 
   /**
    * Message listener registered on chrome.runtime.onMessage.
-   * Returns true synchronously if message is a CDP RPC request to keep port open.
+   * Handles CDP RPC requests and routes GM storage requests.
    */
   public handleMessage(
     message: any,
     sender: chrome.runtime.MessageSender,
     sendResponse: (res: any) => void
   ): boolean | void {
-    if (!message || (message.type !== 'CDP_RPC_REQUEST' && message.type !== 'XOKJ_CDP_REQUEST')) {
+    if (!message) return;
+
+    if (message.type === 'GM_STORAGE_SET' || message.type === 'GM_STORAGE_DELETE') {
+      return gmStorageHandler.handleMessage(message, sender, sendResponse);
+    }
+
+    if (message.type !== 'CDP_RPC_REQUEST' && message.type !== 'XOKJ_CDP_REQUEST') {
       return;
     }
 
@@ -220,7 +163,7 @@ export class CdpBridgeServer {
         sendResponse(response);
       })
       .catch((err) => {
-        sendResponse(this.formatInternalErrorResponse(message?.id, err));
+        sendResponse(formatInternalErrorResponse(message?.id, err));
       });
 
     return true;
@@ -233,60 +176,15 @@ export class CdpBridgeServer {
     request: CdpRpcRequest,
     sender: chrome.runtime.MessageSender
   ): Promise<CdpRpcResponse> {
-    const reqId = request.id || `rpc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-
-    const senderTabId = sender.tab?.id;
-    if (senderTabId === undefined || senderTabId === null) {
-      return {
-        type: 'CDP_RPC_RESPONSE',
-        id: reqId,
-        success: false,
-        error: {
-          code: 403,
-          message: 'Security error: Message sender has no associated tab context'
-        }
-      };
+    const validated = validateRpcRequest(request, sender);
+    if (validated.error) {
+      return validated.error;
     }
 
-    if (request.tabId !== undefined && request.tabId !== senderTabId) {
-      return {
-        type: 'CDP_RPC_RESPONSE',
-        id: reqId,
-        success: false,
-        error: {
-          code: 403,
-          message: `Security violation: Cross-tab CDP access denied. Claimed tab ${request.tabId}, but sender is tab ${senderTabId}`
-        }
-      };
-    }
+    const { reqId, senderTabId } = validated;
 
-    if (!request.method || typeof request.method !== 'string' || request.method.trim() === '') {
-      return {
-        type: 'CDP_RPC_RESPONSE',
-        id: reqId,
-        success: false,
-        error: {
-          code: -32600,
-          message: 'Invalid Request: method must be a non-empty string'
-        }
-      };
-    }
-
-    const tabUrl = sender.tab?.url;
-    if (tabUrl && isRestrictedUrl(tabUrl)) {
-      return {
-        type: 'CDP_RPC_RESPONSE',
-        id: reqId,
-        success: false,
-        error: {
-          code: 403,
-          message: `Security violation: CDP operations are restricted on system page: ${tabUrl}`
-        }
-      };
-    }
-
-    if (request.scriptId || this.enforcePermissions) {
-      const permissionError = await this.validateScriptPermissions(request, sender);
+    if (request.scriptId || this.permissionGuard.enforcePermissions) {
+      const permissionError = await this.permissionGuard.validateScriptPermissions(request, sender);
       if (permissionError) {
         return {
           type: 'CDP_RPC_RESPONSE',
@@ -297,158 +195,14 @@ export class CdpBridgeServer {
       }
     }
 
-    return this.executeCommand(senderTabId, request.method, request.params, reqId);
+    return this.executeCommand(senderTabId!, request.method, request.params, reqId);
   }
 
-  /**
-   * Validates userscript credentials and CDP permissions against storage registry and tab context.
-   */
   public async validateScriptPermissions(
     request: CdpRpcRequest,
     sender: chrome.runtime.MessageSender
   ): Promise<CdpRpcError | null> {
-    const scriptId = request.scriptId;
-
-    if (!scriptId || typeof scriptId !== 'string' || scriptId.trim() === '') {
-      if (this.enforcePermissions) {
-        return {
-          code: 403,
-          message: 'Unauthorized CDP RPC: Missing userscript identifier (scriptId required)',
-          data: { reason: 'MISSING_SCRIPT_ID' }
-        };
-      }
-      return null;
-    }
-
-    const trimmedId = scriptId.trim();
-
-    let script: ScriptRecord | null = this.scriptCache.get(trimmedId) || null;
-    if (!script) {
-      script = await this.scriptResolver(trimmedId);
-      if (script) {
-        this.scriptCache.set(trimmedId, script);
-      }
-    }
-    if (!script) {
-      return {
-        code: 403,
-        message: `Unauthorized CDP RPC: Script '${trimmedId}' not found in registry`,
-        data: { reason: 'SCRIPT_NOT_FOUND', scriptId: trimmedId }
-      };
-    }
-
-    if (!script.enabled) {
-      return {
-        code: 403,
-        message: `Permission denied: Script '${script.name || trimmedId}' is disabled`,
-        data: { reason: 'SCRIPT_DISABLED', scriptId: trimmedId }
-      };
-    }
-
-    const tabUrl = sender.url || sender.tab?.url;
-    if (tabUrl && script.metadata) {
-      const excludes = script.metadata.excludes || [];
-      if (excludes.length > 0 && matchesAny(excludes, tabUrl)) {
-        return {
-          code: 403,
-          message: `Permission denied: Script '${script.name || trimmedId}' is excluded on '${tabUrl}'`,
-          data: { reason: 'URL_EXCLUDED', scriptId: trimmedId, url: tabUrl }
-        };
-      }
-
-      const patterns =
-        script.metadata.matches?.length
-          ? script.metadata.matches
-          : script.metadata.matchPatterns?.length
-          ? script.metadata.matchPatterns
-          : script.metadata.includes || [];
-
-      if (patterns.length > 0 && !matchesAny(patterns, tabUrl)) {
-        return {
-          code: 403,
-          message: `Permission denied: Script '${script.name || trimmedId}' is not authorized for URL '${tabUrl}'`,
-          data: { reason: 'URL_NOT_MATCHED', scriptId: trimmedId, url: tabUrl }
-        };
-      }
-    }
-
-    const grants: string[] = Array.isArray(script.metadata?.grants) ? script.metadata.grants : [];
-    if (grants.includes('none')) {
-      return {
-        code: 403,
-        message: `Permission denied: Script '${script.name || trimmedId}' declared '@grant none' and has no CDP privileges`,
-        data: { reason: 'GRANT_NONE', scriptId: trimmedId }
-      };
-    }
-
-    const hasCdpGrant =
-      grants.includes('GM_cdp') ||
-      grants.includes('cdp') ||
-      grants.includes('*');
-
-    const cdpDecls = script.metadata?.cdpDeclarations || script.metadata?.cdp || [];
-    const hasCdpDirectives = Array.isArray(cdpDecls) && cdpDecls.length > 0;
-    const rawCdpDomains: string[] = Array.isArray(script.metadata?.cdpDomains) ? script.metadata.cdpDomains : [];
-
-    let cdpDomains = rawCdpDomains;
-    if (cdpDomains.length === 0 && Array.isArray(cdpDecls)) {
-      cdpDomains = cdpDecls
-        .map((d: any) => {
-          if (typeof d === 'string') {
-            return d.split('.')[0];
-          }
-          if (d && typeof d === 'object') {
-            return d.domain || (typeof d.command === 'string' ? d.command.split('.')[0] : undefined);
-          }
-          return undefined;
-        })
-        .filter((domain): domain is string => typeof domain === 'string' && domain.length > 0);
-      cdpDomains = Array.from(new Set(cdpDomains));
-    }
-    const hasCdpDomains = cdpDomains.length > 0;
-
-    if (!hasCdpGrant && !hasCdpDirectives && !hasCdpDomains) {
-      return {
-        code: 403,
-        message: `Permission denied: Script '${script.name || trimmedId}' has not requested @cdp or @grant GM_cdp permissions`,
-        data: { reason: 'NO_CDP_PERMISSIONS', scriptId: trimmedId }
-      };
-    }
-
-    if (hasCdpGrant) {
-      return null;
-    }
-
-    const requestedDomain = request.method.split('.')[0];
-    const isDomainAllowed = cdpDomains.includes(requestedDomain) || cdpDomains.includes('*');
-
-    if (!isDomainAllowed) {
-      return {
-        code: 403,
-        message: `Permission denied: Script '${script.name || trimmedId}' is not authorized for CDP domain '${requestedDomain}'. Allowed domains: [${cdpDomains.join(', ')}]`,
-        data: {
-          reason: 'DOMAIN_NOT_AUTHORIZED',
-          scriptId: trimmedId,
-          requestedDomain,
-          allowedDomains: cdpDomains
-        }
-      };
-    }
-
-    return null;
-  }
-
-  /**
-   * Helper to remove a request ID from tabRequests and prune the tab entry if empty.
-   */
-  private removeTabRequest(tabId: number, id: string): void {
-    const reqs = this.tabRequests.get(tabId);
-    if (reqs) {
-      reqs.delete(id);
-      if (reqs.size === 0) {
-        this.tabRequests.delete(tabId);
-      }
-    }
+    return this.permissionGuard.validateScriptPermissions(request, sender);
   }
 
   /**
@@ -476,37 +230,27 @@ export class CdpBridgeServer {
     }
 
     return new Promise<CdpRpcResponse>(async (resolve) => {
-      const timer = setTimeout(() => {
-        this.handleTimeout(id);
-      }, this.timeoutMs);
-
-      const entry: InflightRequestEntry = {
-        id,
-        tabId,
-        method,
-        params,
-        startTime: Date.now(),
-        timer,
-        resolve
-      };
-
-      this.inflightRequests.set(id, entry);
-      if (!this.tabRequests.has(tabId)) {
-        this.tabRequests.set(tabId, new Set());
-      }
-      this.tabRequests.get(tabId)!.add(id);
+      this.timeoutGuard.track(
+        {
+          id,
+          tabId,
+          method,
+          params,
+          startTime: Date.now(),
+          resolve
+        },
+        this.timeoutMs
+      );
 
       if (this.autoAttach) {
         try {
           await this.ensureAttached(tabId);
         } catch (attachErr: any) {
-          if (!this.inflightRequests.has(id)) {
+          if (!this.timeoutGuard.has(id)) {
             return;
           }
 
-          clearTimeout(timer);
-          this.inflightRequests.delete(id);
-          this.removeTabRequest(tabId, id);
+          this.timeoutGuard.settle(id);
 
           const isConflict =
             attachErr instanceof DevToolsConflictError ||
@@ -528,14 +272,12 @@ export class CdpBridgeServer {
         }
       }
 
-      if (!this.inflightRequests.has(id)) {
+      if (!this.timeoutGuard.has(id)) {
         return;
       }
 
       if (typeof chrome === 'undefined' || !chrome.debugger?.sendCommand) {
-        clearTimeout(timer);
-        this.inflightRequests.delete(id);
-        this.removeTabRequest(tabId, id);
+        this.timeoutGuard.settle(id);
         resolve({
           type: 'CDP_RPC_RESPONSE',
           id,
@@ -551,11 +293,8 @@ export class CdpBridgeServer {
       chrome.debugger
         .sendCommand({ tabId }, method, params || {})
         .then((result) => {
-          if (!this.inflightRequests.has(id)) return;
-
-          clearTimeout(timer);
-          this.inflightRequests.delete(id);
-          this.removeTabRequest(tabId, id);
+          if (!this.timeoutGuard.has(id)) return;
+          this.timeoutGuard.settle(id);
 
           resolve({
             type: 'CDP_RPC_RESPONSE',
@@ -565,11 +304,8 @@ export class CdpBridgeServer {
           });
         })
         .catch((cmdErr: any) => {
-          if (!this.inflightRequests.has(id)) return;
-
-          clearTimeout(timer);
-          this.inflightRequests.delete(id);
-          this.removeTabRequest(tabId, id);
+          if (!this.timeoutGuard.has(id)) return;
+          this.timeoutGuard.settle(id);
 
           const errMsg = cmdErr?.message || String(cmdErr) || 'CDP command failed';
           const isConflict =
@@ -593,7 +329,8 @@ export class CdpBridgeServer {
   }
 
   /**
-   * Ensures the debugger is attached to the tab, using per-tab locking to prevent race conditions.
+   * Ensures the debugger is attached to the tab.
+   * Delegates to TabDebuggerManager when available.
    */
   public async ensureAttached(tabId: number): Promise<void> {
     if (this.isTabAttached(tabId)) {
@@ -623,6 +360,7 @@ export class CdpBridgeServer {
             await chrome.debugger.attach({ tabId }, this.protocolVersion);
           }
         }
+
         const isStillAttached = this.debuggerManager
           ? this.debuggerManager.isAttached(tabId)
           : this.attachLocks.get(tabId) === lock;
@@ -670,12 +408,15 @@ export class CdpBridgeServer {
               ? err
               : new DevToolsConflictError(tabId, conflictReason, errMsg);
 
-          await this.broadcastLifecycle({
-            type: 'CDP_LIFECYCLE_EVENT',
-            tabId,
-            status: 'CONFLICT',
-            reason: conflictError.message
-          });
+          // Only broadcast if not delegated to manager
+          if (!this.debuggerManager) {
+            await this.broadcastLifecycle({
+              type: 'CDP_LIFECYCLE_EVENT',
+              tabId,
+              status: 'CONFLICT',
+              reason: conflictError.message
+            });
+          }
           throw conflictError;
         }
 
@@ -696,82 +437,22 @@ export class CdpBridgeServer {
    * Rejects all in-flight promises for a specific tab (e.g. during DevTools conflict).
    */
   public rejectPendingRequestsForTab(tabId: number, error: Error | CdpRpcError): number {
-    const requestIds = this.tabRequests.get(tabId);
-    let rejectedCount = 0;
-
-    if (requestIds && requestIds.size > 0) {
-      const rpcError: CdpRpcError =
-        error instanceof Error
-          ? {
-              code: (error as any).code ?? 1001,
-              message: error.message,
-              data: (error as any).reason
-            }
-          : error;
-
-      for (const id of Array.from(requestIds)) {
-        const entry = this.inflightRequests.get(id);
-        if (entry) {
-          clearTimeout(entry.timer);
-          this.inflightRequests.delete(id);
-          entry.resolve({
-            type: 'CDP_RPC_RESPONSE',
-            id,
-            success: false,
-            error: rpcError
-          });
-          rejectedCount++;
-        }
-      }
-    }
-
-    this.tabRequests.delete(tabId);
+    const count = this.timeoutGuard.rejectPendingRequestsForTab(tabId, error);
     this.attachedTabs.delete(tabId);
     this.attachLocks.delete(tabId);
-
-    return rejectedCount;
+    return count;
   }
 
   public rejectInflightForTab(tabId: number, error: Error | CdpRpcError): number {
     return this.rejectPendingRequestsForTab(tabId, error);
   }
 
-  /**
-   * Handles chrome.tabs.onRemoved event by draining closed tab requests and deallocating resources.
-   */
   public handleTabRemoved(tabId: number): void {
-    const error: CdpRpcError = {
-      code: 1002,
-      message: `Tab ${tabId} was closed`,
-      data: { tabId, reason: 'target_closed' }
-    };
-    this.rejectPendingRequestsForTab(tabId, error);
+    this.timeoutGuard.handleTabRemoved(tabId);
+    this.attachedTabs.delete(tabId);
+    this.attachLocks.delete(tabId);
   }
 
-  /**
-   * Handles timeout for an in-flight request.
-   */
-  private handleTimeout(id: string): void {
-    const entry = this.inflightRequests.get(id);
-    if (!entry) return;
-
-    this.inflightRequests.delete(id);
-    this.removeTabRequest(entry.tabId, id);
-
-    entry.resolve({
-      type: 'CDP_RPC_RESPONSE',
-      id,
-      success: false,
-      error: {
-        code: -32000,
-        message: `CDP RPC request timed out after ${this.timeoutMs}ms for method '${entry.method}'`
-      }
-    });
-  }
-
-  /**
-   * Listener for chrome.debugger.onEvent.
-   */
   private handleDebuggerEvent(
     source: chrome.debugger.Debuggee,
     method: string,
@@ -783,69 +464,24 @@ export class CdpBridgeServer {
     this.broadcastEvent(source.tabId, method, params);
   }
 
-  /**
-   * Forwards a CDP event message to the content script of the specified tab.
-   */
   public async broadcastEvent(tabId: number, method: string, params?: unknown): Promise<void> {
-    const eventMsg: CdpRpcEventMessage = {
-      type: 'CDP_RPC_EVENT',
-      tabId,
-      method,
-      params: params ?? {}
-    };
-
-    try {
-      if (typeof chrome !== 'undefined' && chrome.tabs?.sendMessage) {
-        await chrome.tabs.sendMessage(tabId, eventMsg);
-      }
-    } catch {
-      // Non-fatal
-    }
+    return this.broadcaster.broadcastEvent(tabId, method, params);
   }
 
-  /**
-   * Broadcasts a lifecycle notification to content scripts and runtime (popup/dashboard).
-   */
   public async broadcastLifecycle(
-    eventOrTabId: CdpRpcLifecycleMessage | number,
-    status?: 'ATTACHED' | 'DETACHED' | 'CONFLICT',
+    eventOrTabId: any,
+    status?: CdpLifecycleStatus,
     reason?: string
   ): Promise<void> {
-    const event: CdpRpcLifecycleMessage =
-      typeof eventOrTabId === 'number'
-        ? {
-            type: 'CDP_LIFECYCLE_EVENT',
-            tabId: eventOrTabId,
-            status: status || 'DETACHED',
-            reason
-          }
-        : eventOrTabId;
-
-    if (typeof chrome !== 'undefined') {
-      if (chrome.tabs?.sendMessage && typeof event.tabId === 'number') {
-        try {
-          await chrome.tabs.sendMessage(event.tabId, event);
-        } catch {
-          // Non-fatal if content script is not listening
-        }
-      }
-
-      if (chrome.runtime?.sendMessage) {
-        try {
-          await chrome.runtime.sendMessage(event);
-        } catch {
-          // Non-fatal if popup/dashboard is closed
-        }
-      }
-    }
+    return this.broadcaster.broadcastLifecycle(eventOrTabId, status, reason);
   }
 
-  /**
-   * Defensive listener for chrome.debugger.onDetach.
-   */
-  private handleDebuggerDetach(source: chrome.debugger.Debuggee, reason: string): void {
-    if (source.tabId === undefined || source.tabId === null) return;
+  private handleDebuggerDetach(
+    source: chrome.debugger.Debuggee,
+    reason: string
+  ): void {
     const tabId = source.tabId;
+    if (tabId === undefined || tabId === null) return;
 
     const isConflict = reason === 'canceled_by_user' || reason === 'replaced_with_devtools';
     const error: CdpRpcError = {
@@ -857,22 +493,6 @@ export class CdpBridgeServer {
     };
 
     this.rejectPendingRequestsForTab(tabId, error);
-  }
-
-  /**
-   * Formats internal unhandled exceptions into structured CdpRpcResponse.
-   */
-  private formatInternalErrorResponse(id: string | undefined, err: any): CdpRpcResponse {
-    return {
-      type: 'CDP_RPC_RESPONSE',
-      id: id || 'unknown',
-      success: false,
-      error: {
-        code: -32603,
-        message: err?.message || 'Internal CDP bridge error',
-        data: err?.stack
-      }
-    };
   }
 
   // Accessors & query helpers
@@ -890,7 +510,7 @@ export class CdpBridgeServer {
   public markTabDetached(tabId: number): void {
     this.attachedTabs.delete(tabId);
     this.attachLocks.delete(tabId);
-    this.tabRequests.delete(tabId);
+    this.rejectPendingRequestsForTab(tabId, new Error('Debugger detached'));
   }
 
   public getAttachedTabs(): number[] {
@@ -898,9 +518,6 @@ export class CdpBridgeServer {
   }
 
   public getPendingRequestCount(tabId?: number): number {
-    if (tabId !== undefined) {
-      return this.tabRequests.get(tabId)?.size ?? 0;
-    }
-    return this.inflightRequests.size;
+    return this.timeoutGuard.getPendingRequestCount(tabId);
   }
 }

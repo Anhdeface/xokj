@@ -1,15 +1,17 @@
 /**
  * XOKJ - DevTools Conflict Management & Reconnection Subsystem
+ *
+ * Streamlined coordinator that delegates authoritative CDP lifecycle,
+ * state persistence, and event broadcasting to TabDebuggerManager.
  */
 
 import type {
-  CdpRpcLifecycleMessage,
   DebuggerSessionStatus,
   TabSessionState,
   ReconnectCdpResponse
 } from '@/shared/types';
 import { DevToolsConflictError } from '@/shared/types';
-import { AsyncMutex, getSettings } from '@/shared/storage';
+import { TabDebuggerManager } from './debugger-mgr';
 
 export { DevToolsConflictError };
 
@@ -26,14 +28,17 @@ export interface InflightCommandTracker {
 export interface TabDebuggerSessionController {
   setTabStatus(tabId: number, status: DebuggerSessionStatus, reason?: string): void;
   getTabStatus(tabId: number): DebuggerSessionStatus;
-  attachTab(tabId: number, url?: string, force?: boolean): Promise<void>;
+  attachTab(tabId: number, urlOrOptions?: string | boolean | any, force?: boolean): Promise<any>;
   initializeDeclaredDomains?(tabId: number, targetUrl?: string): Promise<void>;
+  reconnect?(tabId: number): Promise<ReconnectCdpResponse>;
+  handleDetach?(source: chrome.debugger.Debuggee, reason: string): void | Promise<void>;
+  getSession?(tabId: number): TabSessionState | undefined;
+  isAttached?(tabId: number): boolean;
 }
 
 export class DevToolsConflictHandler {
   private inflightTracker: InflightCommandTracker | null = null;
-  private debuggerController: TabDebuggerSessionController | null = null;
-  private sessionMutex = new AsyncMutex();
+  private debuggerController: TabDebuggerSessionController;
   private isListening = false;
 
   private handleDetachBound = this.handleDetach.bind(this);
@@ -44,10 +49,14 @@ export class DevToolsConflictHandler {
     debuggerController?: TabDebuggerSessionController | null
   ) {
     if (inflightTracker) this.inflightTracker = inflightTracker;
-    if (debuggerController) this.debuggerController = debuggerController;
+    this.debuggerController = debuggerController ?? new TabDebuggerManager();
 
-    if (debuggerController && inflightTracker && typeof (debuggerController as any).setInflightTracker === 'function') {
-      (debuggerController as any).setInflightTracker(inflightTracker);
+    if (
+      this.debuggerController &&
+      inflightTracker &&
+      typeof (this.debuggerController as any).setInflightTracker === 'function'
+    ) {
+      (this.debuggerController as any).setInflightTracker(inflightTracker);
     }
   }
 
@@ -56,7 +65,10 @@ export class DevToolsConflictHandler {
    */
   public setInflightTracker(tracker: InflightCommandTracker): void {
     this.inflightTracker = tracker;
-    if (this.debuggerController && typeof (this.debuggerController as any).setInflightTracker === 'function') {
+    if (
+      this.debuggerController &&
+      typeof (this.debuggerController as any).setInflightTracker === 'function'
+    ) {
       (this.debuggerController as any).setInflightTracker(tracker);
     }
   }
@@ -66,23 +78,22 @@ export class DevToolsConflictHandler {
    */
   public setDebuggerController(controller: TabDebuggerSessionController): void {
     this.debuggerController = controller;
-    if (this.inflightTracker && typeof (controller as any).setInflightTracker === 'function') {
+    if (
+      this.inflightTracker &&
+      typeof (controller as any).setInflightTracker === 'function'
+    ) {
       (controller as any).setInflightTracker(this.inflightTracker);
     }
   }
 
   /**
-   * Start listening to chrome.debugger.onDetach and chrome.runtime.onMessage.
+   * Start listening to chrome.runtime.onMessage for RECONNECT_CDP.
+   * Single-owner: TabDebuggerManager is the authoritative listener for chrome.debugger.onDetach.
    */
   public init(): void {
     if (this.isListening) return;
 
     if (typeof chrome !== 'undefined') {
-      // Single Owner: When debuggerController is present, TabDebuggerManager is the sole
-      // listener for chrome.debugger.onDetach. Only attach directly in standalone fallback mode.
-      if (!this.debuggerController && chrome.debugger?.onDetach) {
-        chrome.debugger.onDetach.addListener(this.handleDetachBound);
-      }
       if (chrome.runtime?.onMessage) {
         chrome.runtime.onMessage.addListener(this.handleRuntimeMessageBound);
       }
@@ -96,15 +107,12 @@ export class DevToolsConflictHandler {
   }
 
   /**
-   * Teardown event listeners.
+   * Teardown runtime message listener.
    */
   public destroy(): void {
     if (!this.isListening) return;
 
     if (typeof chrome !== 'undefined') {
-      if (!this.debuggerController && chrome.debugger?.onDetach) {
-        chrome.debugger.onDetach.removeListener(this.handleDetachBound);
-      }
       if (chrome.runtime?.onMessage) {
         chrome.runtime.onMessage.removeListener(this.handleRuntimeMessageBound);
       }
@@ -119,53 +127,15 @@ export class DevToolsConflictHandler {
 
   /**
    * Core handler for chrome.debugger.onDetach.
+   * Directly delegates to TabDebuggerManager.
    */
   public async handleDetach(
     source: chrome.debugger.Debuggee,
     reason: string
   ): Promise<void> {
-    const tabId = source.tabId;
-    if (typeof tabId !== 'number') return;
-
-    let isEngineDisabled = false;
-    try {
-      const settings = await getSettings();
-      if (settings && !settings.globalEnabled) {
-        isEngineDisabled = true;
-      }
-    } catch {}
-
-    const isCleanDetach =
-      this.debuggerController?.getTabStatus(tabId) === 'IDLE' ||
-      this.debuggerController?.getTabStatus(tabId) === 'DETACHED';
-
-    const isConflict =
-      !isCleanDetach &&
-      !isEngineDisabled &&
-      (reason === 'canceled_by_user' || reason === 'replaced_with_devtools');
-    const targetStatus: DebuggerSessionStatus = isConflict ? 'CONFLICT' : (isEngineDisabled ? 'IDLE' : 'DETACHED');
-
-    const conflictError = isConflict
-      ? new DevToolsConflictError(
-          tabId,
-          reason,
-          'DevTools conflict: native developer tools opened on tab'
-        )
-      : new Error(`CDP session detached: ${reason}`);
-
-    // Reject all inflight command promises for this tab
-    if (this.inflightTracker) {
-      this.inflightTracker.rejectInflightForTab(tabId, conflictError as any);
+    if (typeof (this.debuggerController as any).handleDetach === 'function') {
+      return (this.debuggerController as any).handleDetach(source, reason);
     }
-
-    // Update memory state
-    if (this.debuggerController) {
-      this.debuggerController.setTabStatus(tabId, targetStatus, reason);
-    }
-
-    // Persist and broadcast
-    await this.persistTabState(tabId, targetStatus, reason);
-    await this.broadcastLifecycle(tabId, targetStatus, reason);
   }
 
   /**
@@ -198,20 +168,19 @@ export class DevToolsConflictHandler {
 
   /**
    * Reconnect debugger to target tab after DevTools is closed.
+   * Delegates to TabDebuggerManager.reconnect(tabId).
    */
   public async reconnectTab(tabId: number): Promise<ReconnectCdpResponse> {
-    try {
-      if (this.debuggerController) {
-        await this.debuggerController.attachTab(tabId, undefined, true);
-        if (this.debuggerController.initializeDeclaredDomains) {
-          await this.debuggerController.initializeDeclaredDomains(tabId);
-        }
-      } else if (typeof chrome !== 'undefined' && chrome.debugger?.attach) {
-        await chrome.debugger.attach({ tabId }, '1.3');
-        await this.persistTabState(tabId, 'ATTACHED');
-        await this.broadcastLifecycle(tabId, 'ATTACHED');
-      }
+    if (typeof this.debuggerController.reconnect === 'function') {
+      return this.debuggerController.reconnect(tabId);
+    }
 
+    // Fallback if controller doesn't implement reconnect directly
+    try {
+      await this.debuggerController.attachTab(tabId, undefined, true);
+      if (this.debuggerController.initializeDeclaredDomains) {
+        await this.debuggerController.initializeDeclaredDomains(tabId);
+      }
       return { success: true };
     } catch (err: any) {
       const errorMessage = err?.message || String(err);
@@ -223,7 +192,6 @@ export class DevToolsConflictHandler {
         if (this.debuggerController) {
           this.debuggerController.setTabStatus(tabId, 'CONFLICT', 'DevTools is still active');
         }
-        await this.persistTabState(tabId, 'CONFLICT', 'DevTools is still active');
         return {
           success: false,
           error: 'DevTools is still open. Please close DevTools before reconnecting.'
@@ -234,88 +202,6 @@ export class DevToolsConflictHandler {
         success: false,
         error: `Reconnection failed: ${errorMessage}`
       };
-    }
-  }
-
-  /**
-   * Persist session state to storage areas without throwing.
-   */
-  private async persistTabState(
-    tabId: number,
-    status: DebuggerSessionStatus,
-    reason?: string
-  ): Promise<void> {
-    const sessionRecord: Partial<TabSessionState> = {
-      tabId,
-      status,
-      attached: status === 'ATTACHED',
-      conflictDetected: status === 'CONFLICT',
-      conflictReason: status === 'CONFLICT' ? reason : undefined,
-      activeDomains: status === 'IDLE' ? [] : undefined,
-      updatedAt: Date.now()
-    };
-
-    if (typeof chrome !== 'undefined') {
-      if (chrome.storage?.session?.set) {
-        try {
-          await chrome.storage.session.set({
-            [`tab_session_${tabId}`]: sessionRecord
-          });
-        } catch {
-          // Non-fatal
-        }
-      }
-
-      if (chrome.storage?.local?.get && chrome.storage?.local?.set) {
-        try {
-          await this.sessionMutex.runExclusive(async () => {
-            const stored = await chrome.storage.local.get('tab_sessions');
-            const sessions = stored.tab_sessions || {};
-            sessions[tabId] = {
-              ...sessions[tabId],
-              ...sessionRecord
-            };
-            await chrome.storage.local.set({ tab_sessions: sessions });
-          });
-        } catch {
-          // Non-fatal
-        }
-      }
-    }
-  }
-
-  /**
-   * Safe broadcast to content scripts and popup UI.
-   */
-  private async broadcastLifecycle(
-    tabId: number,
-    status: DebuggerSessionStatus,
-    reason?: string
-  ): Promise<void> {
-    const lifecycleStatus =
-      status === 'CONFLICT' ? 'CONFLICT' : status === 'ATTACHED' ? 'ATTACHED' : 'DETACHED';
-
-    const lifecycleMessage: CdpRpcLifecycleMessage = {
-      type: 'CDP_LIFECYCLE_EVENT',
-      tabId,
-      status: lifecycleStatus,
-      reason
-    };
-
-    if (typeof chrome !== 'undefined' && chrome.tabs?.sendMessage) {
-      try {
-        await chrome.tabs.sendMessage(tabId, lifecycleMessage);
-      } catch {
-        // Non-fatal
-      }
-    }
-
-    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-      try {
-        await chrome.runtime.sendMessage(lifecycleMessage);
-      } catch {
-        // Non-fatal
-      }
     }
   }
 }

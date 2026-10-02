@@ -8,6 +8,7 @@ import { CdpBridgeServer } from './cdp-bridge';
 import { DevToolsConflictHandler } from './conflict-mgr';
 import { ScriptInjector } from './injector';
 import { UiIpcServer } from './ui-ipc';
+import { gmStorageHandler } from './gm-handler';
 
 console.log('[XOKJ Background] Initializing service worker subsystems...');
 
@@ -30,6 +31,8 @@ export const scriptInjector = new ScriptInjector({
 
 export const uiIpcServer = new UiIpcServer(debuggerMgr);
 
+export { gmStorageHandler };
+
 // Start all services synchronously to guarantee MV3 listener registration in the initial turn
 function initSubsystems(): void {
   try {
@@ -37,6 +40,7 @@ function initSubsystems(): void {
     conflictHandler.init();
     scriptInjector.init();
     uiIpcServer.init();
+    gmStorageHandler.init();
     debuggerMgr.init().catch((err) => {
       console.error('[XOKJ Background] debuggerMgr.init failed:', err);
     });

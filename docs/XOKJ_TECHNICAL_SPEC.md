@@ -149,8 +149,9 @@ When `chrome.debugger.sendCommand` completes, the corresponding promise is settl
 ### 4.3. Event Multiplexing and Channel Routing
 CDP backend events emitted via `chrome.debugger.onEvent` are routed to content scripts:
 1. The service worker receives `(source, method, params)`.
-2. It locates all content scripts in `source.tabId` that hold permission for `method`.
-3. It dispatches a message `{ type: 'XOKJ_CDP_EVENT', event: method, data: params }` via `chrome.tabs.sendMessage`.
+2. It validates that the tab has an active attached session and userscripts with permission for `method`.
+3. It dispatches a message `{ type: 'CDP_RPC_EVENT', tabId, method, params }` via `chrome.tabs.sendMessage(tabId, message)`.
+4. `ContentScriptBridge` intercepts the message and relays it via `window.postMessage` to all listening userscripts in the MAIN world.
 
 ---
 
@@ -222,30 +223,47 @@ To prevent duplicate execution in pages with complex nested iframes:
 
 ## 7. Storage Subsystem & FIFO AsyncMutex
 
-The storage subsystem (`src/shared/storage.ts`) manages persistent state in `chrome.storage.local`.
+The storage subsystem (`src/shared/storage/`) manages persistent state in `chrome.storage.local`.
 
 ### 7.1. Storage Schema Design
 
+The extension persists configuration, installed scripts, and session states in `chrome.storage.local`:
+
 ```typescript
-interface StorageSchema {
-  /** Array of installed userscripts */
-  scripts: UserScript[];
+export interface ExtensionStorageSchema {
+  /** Schema migration version integer */
+  schemaVersion: number;
+  /** Primary dictionary of installed userscripts indexed by unique ID */
+  scripts: Record<string, ScriptRecord>;
   /** Global application configuration */
   settings: AppSettings;
-  /** Active matching script cache */
-  scriptCache?: Record<string, UserScript>;
+  /** Active tab debugger session cache */
+  tab_sessions?: Record<number, TabSessionState>;
 }
 
-interface UserScript {
+export interface ScriptRecord {
   id: string;
   name: string;
   code: string;
-  enabled: boolean;
   metadata: ParsedMetadata;
+  enabled: boolean;
   createdAt: number;
   updatedAt: number;
+  lastRunAt?: number;
+  parseErrors?: string[];
+}
+
+export interface AppSettings {
+  globalEnabled: boolean;
+  autoAttachDebugger: boolean;
+  debuggerProtocolVersion?: string; // Default: '1.3'
+  logLevel: 'debug' | 'info' | 'warn' | 'error';
 }
 ```
+
+Persistent userscript key-value data created via `GM_setValue` is partitioned into dedicated script buckets in `chrome.storage.local`:
+- Prefix: `gm_values_<scriptId>` -> `Record<string, unknown>`
+- Managed by `GmStorageRepository` (`src/shared/storage/gm-repo.ts`) with mutex-serialized atomic transactions.
 
 ### 7.2. FIFO AsyncMutex Implementation
 `chrome.storage.local` provides asynchronous APIs (`get`, `set`) without native transaction locking. Simultaneous mutations (e.g. toggling two scripts concurrently) can result in lost updates.
@@ -297,14 +315,25 @@ Chromium isolates content scripts into separate JavaScript execution worlds:
 
 ### 8.1. PostMessage Relay & Channel Tokens
 Communication between the Userscript SDK in the MAIN world and the Content Script Bridge in the ISOLATED world uses `window.postMessage`:
-1. Each message contains a constant channel identifier (`XOKJ_CDP_REQUEST`, `XOKJ_CDP_RESPONSE`, `XOKJ_CDP_EVENT`).
-2. A fast-path pre-filter drops non-matching messages immediately before payload parsing.
-3. Payloads include a unique correlation token (`messageId`) to map asynchronous responses back to the originating caller.
+1. Canonical message types:
+   - `CDP_RPC_REQUEST`: Dispatched by userscript to invoke CDP methods.
+   - `CDP_RPC_RESPONSE`: Dispatched by bridge returning RPC result or error.
+   - `CDP_RPC_EVENT`: Dispatched by bridge pushing live CDP events.
+   - `CDP_LIFECYCLE_EVENT`: Dispatched by bridge pushing status changes (`ATTACHED`, `CONFLICT`, `DETACHED`).
+   - `GM_STORAGE_SET`: Dispatched by userscript to write-through storage mutations.
+   - `GM_STORAGE_DELETE`: Dispatched by userscript to delete stored keys.
+2. Step 0 fast-path pre-filter drops non-matching messages immediately before payload parsing.
+3. Payloads include a correlation token (`id`) to map asynchronous responses back to the originating caller.
+4. Cryptographic channel tokens (`channelId`) authorize communication between the MAIN world sandbox and ISOLATED world bridge.
 
 ### 8.2. Userscript Sandbox & Grant API Polyfills
-`src/content/sandbox.ts` wraps userscript evaluation:
-- If `@grant none` is specified, the script executes with standard page capabilities.
-- If `@grant GM_*` or `@grant GM_cdp` is specified, an isolated execution context is constructed, injecting polyfilled `GM_setValue`, `GM_getValue`, `GM_xmlhttpRequest`, and `cdp` SDK objects.
+`src/background/injector/page-runner.ts` executes userscripts directly in the target tab's MAIN world:
+- If `@grant none` is specified, all 9 privileged keys are shadowed with `undefined`.
+- If `@grant` directives or `@cdp` are specified, an isolated execution scope is constructed exposing only authorized APIs:
+  - CDP APIs: `cdp.send()`, `cdp.on()`, `cdp.off()`, `cdp.getStatus()`, `cdp.isAttached()`, and `GM_cdp(...)`.
+  - Greasemonkey APIs: `GM_setValue()`, `GM_getValue()`, `GM_deleteValue()`, `GM_listValues()`, `GM_addStyle()`, `GM_log()`, and `GM_info`.
+- All ungranted privileged keys are explicitly shadowed with `undefined` in the wrapper scope.
+- In-memory storage is pre-hydrated from `chrome.storage.local` prior to execution, ensuring synchronous `GM_getValue` with zero async delay.
 
 ---
 
@@ -315,11 +344,11 @@ The user interface components are built with Vue 3 and bundled via Vite:
 - **Extension Popup (`src/popup/`)**:
   - Displays scripts matching the active tab URL.
   - Provides instant toggle switches that persist state via `chrome.runtime.sendMessage({ type: 'TOGGLE_SCRIPT' })`.
-  - Shows live CDP status badges (`CONNECTED`, `IDLE`, `CONFLICT`).
+  - Shows live CDP status badges (`ATTACHED`, `ATTACHING`, `CONFLICT`, `DETACHED`, `IDLE`).
 - **Management Dashboard (`src/dashboard/`)**:
-  - Full-screen userscript editor.
-  - Integrates CodeMirror 6 with dynamic language highlighting, dark theme, and keyboard shortcuts.
-  - Chunk-split in Vite configuration to ensure editor bundles are only loaded when opening the dashboard.
+  - Modular architecture decomposed into `ScriptList.vue`, `ScriptEditor.vue`, `MetadataPanel.vue`, `ImportExportModal.vue`, and composable `useDashboardState.ts`.
+  - Full-screen userscript editor integrating CodeMirror 6 with dynamic language highlighting, dark theme, and keyboard shortcuts (`Mod-s`).
+  - Chunk-split in Vite configuration ensuring CodeMirror bundle is loaded only on dashboard access (dashboard entry chunk < 50 kB).
 
 ---
 

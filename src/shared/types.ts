@@ -288,6 +288,25 @@ export interface TabSessionState {
 export type TabSession = TabSessionState;
 
 /**
+ * TabSessionRecord conforming to PROJECT.md architectural contracts.
+ */
+export type TabSessionRecord = TabSessionState;
+
+/**
+ * Options passed to TabDebuggerManager.attachTab().
+ */
+export interface AttachOptions {
+  url?: string;
+  force?: boolean;
+  protocolVersion?: string;
+}
+
+/**
+ * Payload broadcast for CDP session lifecycle changes conforming to PROJECT.md contracts.
+ */
+export type CdpLifecyclePayload = CdpRpcLifecycleMessage;
+
+/**
  * DevTools conflict event description.
  */
 export interface ConflictEvent {
@@ -364,9 +383,10 @@ export interface ReconnectCdpMessage {
   tabId: number;
 }
 
-export interface ReconnectCdpResponse {
+export interface ReconnectCdpResponse extends Partial<TabSessionState> {
   success: boolean;
   error?: string;
+  session?: TabSessionRecord;
 }
 
 export interface GetTabSessionMessage {
@@ -376,6 +396,26 @@ export interface GetTabSessionMessage {
 
 export interface GetTabSessionResponse {
   session?: TabSessionState;
+}
+
+export interface GmStorageSetMessage {
+  type: 'GM_STORAGE_SET';
+  scriptId: string;
+  key: string;
+  value: unknown;
+}
+
+export interface GmStorageDeleteMessage {
+  type: 'GM_STORAGE_DELETE';
+  scriptId: string;
+  key: string;
+}
+
+export type GmStorageMessage = GmStorageSetMessage | GmStorageDeleteMessage;
+
+export interface GmStorageResponse {
+  success: boolean;
+  error?: string;
 }
 
 /**
@@ -388,6 +428,7 @@ export type ExtensionMessage =
   | GetCdpStatusMessage
   | ReconnectCdpMessage
   | GetTabSessionMessage
+  | GmStorageMessage
   | CdpRpcRequest
   | CdpRpcResponse
   | CdpRpcEventMessage

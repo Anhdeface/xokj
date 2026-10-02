@@ -998,4 +998,337 @@ describe('Feature 14: Content Script Message Bridge (bridge.ts)', () => {
       );
     });
   });
+
+  describe('Tier 6: GM Storage Mutation Validation & Forwarding', () => {
+    it('T6.1: relays valid GM_STORAGE_SET from window.postMessage to chrome.runtime.sendMessage', async () => {
+      context.mockRuntime.sendMessage.mockImplementation((_msg: any, cb?: any) => {
+        cb?.({ success: true });
+        return Promise.resolve({ success: true });
+      });
+
+      await bridge.handlePageMessage({
+        source: window,
+        origin: window.location.origin,
+        data: {
+          source: 'xokj-userscript',
+          channelId: bridge.getChannelId(),
+          type: 'GM_STORAGE_SET',
+          scriptId: 'test-script-1',
+          key: 'user-pref',
+          value: { theme: 'dark', fontSize: 14 }
+        }
+      } as any);
+
+      expect(context.mockRuntime.sendMessage).toHaveBeenCalledWith(
+        {
+          type: 'GM_STORAGE_SET',
+          scriptId: 'test-script-1',
+          key: 'user-pref',
+          value: { theme: 'dark', fontSize: 14 }
+        },
+        expect.any(Function)
+      );
+    });
+
+    it('T6.2: relays valid GM_STORAGE_DELETE from window.postMessage to chrome.runtime.sendMessage', async () => {
+      context.mockRuntime.sendMessage.mockImplementation((_msg: any, cb?: any) => {
+        cb?.({ success: true });
+        return Promise.resolve({ success: true });
+      });
+
+      await bridge.handlePageMessage({
+        source: window,
+        origin: window.location.origin,
+        data: {
+          source: 'xokj-userscript',
+          channelId: bridge.getChannelId(),
+          type: 'GM_STORAGE_DELETE',
+          scriptId: 'test-script-1',
+          key: 'user-pref'
+        }
+      } as any);
+
+      expect(context.mockRuntime.sendMessage).toHaveBeenCalledWith(
+        {
+          type: 'GM_STORAGE_DELETE',
+          scriptId: 'test-script-1',
+          key: 'user-pref'
+        },
+        expect.any(Function)
+      );
+    });
+
+    it('T6.3: enforces 4-layer security validation on GM storage messages', async () => {
+      // 1. Source mismatch
+      await bridge.handlePageMessage({
+        source: {} as any, // not window
+        origin: window.location.origin,
+        data: {
+          source: 'xokj-userscript',
+          channelId: bridge.getChannelId(),
+          type: 'GM_STORAGE_SET',
+          scriptId: 's1',
+          key: 'k1',
+          value: 'v1'
+        }
+      } as any);
+      expect(context.mockRuntime.sendMessage).not.toHaveBeenCalled();
+
+      // 2. Foreign sender source
+      await bridge.handlePageMessage({
+        source: window,
+        origin: window.location.origin,
+        data: {
+          source: 'malicious-script',
+          channelId: bridge.getChannelId(),
+          type: 'GM_STORAGE_SET',
+          scriptId: 's1',
+          key: 'k1',
+          value: 'v1'
+        }
+      } as any);
+      expect(context.mockRuntime.sendMessage).not.toHaveBeenCalled();
+
+      // 3. ChannelId mismatch (when required)
+      const strictBridge = new ContentScriptBridge({
+        channelId: 'secret-token-123',
+        requireChannelId: true,
+        autoStart: true
+      });
+      await strictBridge.handlePageMessage({
+        source: window,
+        origin: window.location.origin,
+        data: {
+          source: 'xokj-userscript',
+          channelId: 'wrong-token',
+          type: 'GM_STORAGE_SET',
+          scriptId: 's1',
+          key: 'k1',
+          value: 'v1'
+        }
+      } as any);
+      expect(context.mockRuntime.sendMessage).not.toHaveBeenCalled();
+      strictBridge.destroy();
+    });
+
+    it('T6.4: drops GM_STORAGE_SET when scriptId or key is empty or invalid', async () => {
+      await bridge.handlePageMessage({
+        source: window,
+        origin: window.location.origin,
+        data: {
+          source: 'xokj-userscript',
+          channelId: bridge.getChannelId(),
+          type: 'GM_STORAGE_SET',
+          scriptId: '   ',
+          key: 'validKey',
+          value: 123
+        }
+      } as any);
+      expect(context.mockRuntime.sendMessage).not.toHaveBeenCalled();
+
+      await bridge.handlePageMessage({
+        source: window,
+        origin: window.location.origin,
+        data: {
+          source: 'xokj-userscript',
+          channelId: bridge.getChannelId(),
+          type: 'GM_STORAGE_SET',
+          scriptId: 'validScript',
+          key: '',
+          value: 123
+        }
+      } as any);
+      expect(context.mockRuntime.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('T6.5: strips client-provided tabId from storage mutations before forwarding', async () => {
+      await bridge.handlePageMessage({
+        source: window,
+        origin: window.location.origin,
+        data: {
+          source: 'xokj-userscript',
+          channelId: bridge.getChannelId(),
+          type: 'GM_STORAGE_SET',
+          tabId: 9999, // Attempted spoof
+          scriptId: 'safe-script',
+          key: 'safe-key',
+          value: 'safe-val'
+        }
+      } as any);
+
+      expect(context.mockRuntime.sendMessage).toHaveBeenCalledWith(
+        expect.not.objectContaining({ tabId: 9999 }),
+        expect.any(Function)
+      );
+    });
+
+    it('T6.6: allows GM storage mutations to proceed even when bridge is in CONFLICT status', async () => {
+      bridge.handleConflict('canceled_by_user');
+      expect(bridge.getStatus().status).toBe('CONFLICT');
+
+      await bridge.handlePageMessage({
+        source: window,
+        origin: window.location.origin,
+        data: {
+          source: 'xokj-userscript',
+          channelId: bridge.getChannelId(),
+          type: 'GM_STORAGE_SET',
+          scriptId: 'conflict-script',
+          key: 'k',
+          value: 'persists-during-devtools'
+        }
+      } as any);
+
+      expect(context.mockRuntime.sendMessage).toHaveBeenCalledWith(
+        {
+          type: 'GM_STORAGE_SET',
+          scriptId: 'conflict-script',
+          key: 'k',
+          value: 'persists-during-devtools'
+        },
+        expect.any(Function)
+      );
+    });
+
+    it('T6.7: posts GM_STORAGE_RESPONSE back to window when message includes an id', async () => {
+      context.mockRuntime.sendMessage.mockImplementation((_msg: any, cb?: any) => {
+        cb?.({ success: true });
+        return Promise.resolve({ success: true });
+      });
+
+      await bridge.handlePageMessage({
+        source: window,
+        origin: window.location.origin,
+        data: {
+          source: 'xokj-userscript',
+          channelId: bridge.getChannelId(),
+          type: 'GM_STORAGE_SET',
+          id: 'storage-ack-1',
+          scriptId: 'script-ack',
+          key: 'token',
+          value: 'xyz'
+        }
+      } as any);
+
+      expect(postedToWindow).toContainEqual(
+        expect.objectContaining({
+          type: 'GM_STORAGE_RESPONSE',
+          id: 'storage-ack-1',
+          success: true
+        })
+      );
+    });
+
+    it('T6.8: handles background storage error gracefully without crashing bridge', async () => {
+      context.mockRuntime.sendMessage.mockImplementation((_msg: any, _cb?: any) => {
+        throw new Error('Storage write failed: quota exceeded');
+      });
+
+      await expect(
+        bridge.handlePageMessage({
+          source: window,
+          origin: window.location.origin,
+          data: {
+            source: 'xokj-userscript',
+            channelId: bridge.getChannelId(),
+            type: 'GM_STORAGE_SET',
+            id: 'storage-fail-1',
+            scriptId: 'script-err',
+            key: 'huge-data',
+            value: 'overflow'
+          }
+        } as any)
+      ).resolves.not.toThrow();
+
+      expect(postedToWindow).toContainEqual(
+        expect.objectContaining({
+          type: 'GM_STORAGE_RESPONSE',
+          id: 'storage-fail-1',
+          success: false,
+          error: expect.stringContaining('quota exceeded')
+        })
+      );
+    });
+  });
+
+  describe('Tier 7: Live CDP Event Robustness & Normalization', () => {
+    it('T7.1: normalizes missing or undefined params in CDP_RPC_EVENT to empty object {}', () => {
+      const listener = vi.fn();
+      bridge.on('Network.requestWillBeSent', listener);
+
+      bridge.handleRuntimeMessage({
+        type: 'CDP_RPC_EVENT',
+        tabId: 10,
+        method: 'Network.requestWillBeSent'
+        // params omitted
+      });
+
+      expect(listener).toHaveBeenCalledWith({});
+      expect(postedToWindow).toContainEqual(
+        expect.objectContaining({
+          type: 'CDP_RPC_EVENT',
+          method: 'Network.requestWillBeSent',
+          params: {}
+        })
+      );
+    });
+
+    it('T7.2: safely drops CDP_RPC_EVENT without method without throwing', () => {
+      expect(() => {
+        bridge.handleRuntimeMessage({
+          type: 'CDP_RPC_EVENT',
+          tabId: 10
+          // method omitted
+        });
+      }).not.toThrow();
+
+      expect(postedToWindow.filter((m) => m.type === 'CDP_RPC_EVENT')).toHaveLength(0);
+    });
+
+    it('T7.3: dispatches to multiple subscribers for the same method independently', () => {
+      const h1 = vi.fn();
+      const h2 = vi.fn();
+
+      bridge.on('Page.loadEventFired', h1);
+      bridge.on('Page.loadEventFired', h2);
+
+      bridge.handleRuntimeMessage({
+        type: 'CDP_RPC_EVENT',
+        tabId: 10,
+        method: 'Page.loadEventFired',
+        params: { timestamp: 12345 }
+      });
+
+      expect(h1).toHaveBeenCalledWith({ timestamp: 12345 });
+      expect(h2).toHaveBeenCalledWith({ timestamp: 12345 });
+    });
+
+    it('T7.4: exception in one local subscriber does not abort subsequent subscribers or window postMessage', () => {
+      const faultyHandler = vi.fn().mockImplementation(() => {
+        throw new Error('Subscriber crashed');
+      });
+      const healthyHandler = vi.fn();
+
+      bridge.on('DOM.documentUpdated', faultyHandler);
+      bridge.on('DOM.documentUpdated', healthyHandler);
+
+      bridge.handleRuntimeMessage({
+        type: 'CDP_RPC_EVENT',
+        tabId: 10,
+        method: 'DOM.documentUpdated',
+        params: { count: 1 }
+      });
+
+      expect(faultyHandler).toHaveBeenCalled();
+      expect(healthyHandler).toHaveBeenCalledWith({ count: 1 });
+      expect(postedToWindow).toContainEqual(
+        expect.objectContaining({
+          type: 'CDP_RPC_EVENT',
+          method: 'DOM.documentUpdated',
+          params: { count: 1 }
+        })
+      );
+    });
+  });
 });
+

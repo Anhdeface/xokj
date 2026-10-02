@@ -7,9 +7,9 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { setupChromeMock } from '../mocks/chrome';
-import { ScriptInjector, pageSandboxRunner } from '@/background/injector';
+import { ScriptInjector, pageSandboxRunner, PrehydratedStorageLoader } from '@/background/injector';
 import { TabDebuggerManager } from '@/background/debugger-mgr';
-import { saveScript, resetToDefaultScripts, saveSettings, deleteScript } from '@/shared/storage';
+import { saveScript, resetToDefaultScripts, saveSettings, deleteScript, setGmValue } from '@/shared/storage';
 import type { ScriptRecord } from '@/shared/types';
 
 describe('Feature 16: Lifecycle-based Script Injection (injector.ts)', () => {
@@ -765,6 +765,318 @@ describe('Feature 16: Lifecycle-based Script Injection (injector.ts)', () => {
       expect(call).toBeDefined();
       expect(call.args[4]).toBe('custom-tab-channel');
     });
+
+    it('T5.10: pageSandboxRunner cdp.on receives live CDP_RPC_EVENT messages and dispatches exact match', () => {
+      const code = `
+        window.__eventsReceived = [];
+        cdp.on('Network.requestWillBeSent', function(params) {
+          window.__eventsReceived.push(params);
+        });
+      `;
+
+      pageSandboxRunner(code, 'CDP On Script', 'cdp-on-id', { grants: ['cdp'] });
+
+      // Simulate live event from bridge
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          source: window,
+          data: {
+            source: 'xokj-bridge',
+            type: 'CDP_RPC_EVENT',
+            method: 'Network.requestWillBeSent',
+            params: { requestId: 'req-live-1', url: 'https://api.example.com' }
+          }
+        })
+      );
+
+      const received = (window as any).__eventsReceived;
+      expect(received).toHaveLength(1);
+      expect(received[0]).toEqual({ requestId: 'req-live-1', url: 'https://api.example.com' });
+
+      delete (window as any).__eventsReceived;
+    });
+
+    it('T5.11: pageSandboxRunner cdp.on matches domain wildcards (Domain.*) and global wildcard (*)', () => {
+      const code = `
+        window.__wildcardReceived = [];
+        cdp.on('Page.*', function(params, method) {
+          window.__wildcardReceived.push({ type: 'domain', method: method, params: params });
+        });
+        cdp.on('*', function(params, method) {
+          window.__wildcardReceived.push({ type: 'global', method: method, params: params });
+        });
+      `;
+
+      pageSandboxRunner(code, 'CDP Wildcard Script', 'cdp-wildcard-id', { grants: ['cdp'] });
+
+      // Emit Page.loadEventFired
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          source: window,
+          data: {
+            source: 'xokj-bridge',
+            type: 'CDP_RPC_EVENT',
+            method: 'Page.loadEventFired',
+            params: { timestamp: 100 }
+          }
+        })
+      );
+
+      // Emit Network.responseReceived
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          source: window,
+          data: {
+            source: 'xokj-bridge',
+            type: 'CDP_RPC_EVENT',
+            method: 'Network.responseReceived',
+            params: { status: 200 }
+          }
+        })
+      );
+
+      const events = (window as any).__wildcardReceived;
+      expect(events).toEqual([
+        { type: 'domain', method: 'Page.loadEventFired', params: { timestamp: 100 } },
+        { type: 'global', method: 'Page.loadEventFired', params: { timestamp: 100 } },
+        { type: 'global', method: 'Network.responseReceived', params: { status: 200 } }
+      ]);
+
+      delete (window as any).__wildcardReceived;
+    });
+
+    it('T5.12: pageSandboxRunner cdp.off and returned unsubscribe callback remove handlers', () => {
+      const code = `
+        window.__unsubProbe = { count1: 0, count2: 0 };
+        function handler1() { window.__unsubProbe.count1++; }
+        function handler2() { window.__unsubProbe.count2++; }
+
+        var unsub1 = cdp.on('DOM.documentUpdated', handler1);
+        cdp.on('DOM.documentUpdated', handler2);
+
+        unsub1();
+        cdp.off('DOM.documentUpdated', handler2);
+      `;
+
+      pageSandboxRunner(code, 'CDP Unsub Script', 'cdp-unsub-id', { grants: ['cdp'] });
+
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          source: window,
+          data: {
+            source: 'xokj-bridge',
+            type: 'CDP_RPC_EVENT',
+            method: 'DOM.documentUpdated',
+            params: {}
+          }
+        })
+      );
+
+      expect((window as any).__unsubProbe).toEqual({ count1: 0, count2: 0 });
+      delete (window as any).__unsubProbe;
+    });
+
+    it('T5.13: pageSandboxRunner isolates subscriber callback exceptions so other subscribers continue executing', () => {
+      const code = `
+        window.__isolationProbe = [];
+        cdp.on('Runtime.exceptionThrown', function() {
+          throw new Error('Subscriber 1 exploded');
+        });
+        cdp.on('Runtime.exceptionThrown', function(params) {
+          window.__isolationProbe.push(params);
+        });
+      `;
+
+      pageSandboxRunner(code, 'CDP Isolation Script', 'cdp-iso-id', { grants: ['cdp'] });
+
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          source: window,
+          data: {
+            source: 'xokj-bridge',
+            type: 'CDP_RPC_EVENT',
+            method: 'Runtime.exceptionThrown',
+            params: { text: 'test error' }
+          }
+        })
+      );
+
+      expect((window as any).__isolationProbe).toEqual([{ text: 'test error' }]);
+      delete (window as any).__isolationProbe;
+    });
+
+    it('T5.14: pageSandboxRunner GM_cdp provides functional .on, .off, .send, .getStatus, and .isAttached', () => {
+      const code = `
+        window.__gmCdpProbe = {
+          isFn: typeof GM_cdp === 'function',
+          hasSend: typeof GM_cdp.send === 'function',
+          hasOn: typeof GM_cdp.on === 'function',
+          hasOff: typeof GM_cdp.off === 'function',
+          hasGetStatus: typeof GM_cdp.getStatus === 'function',
+          status: GM_cdp.getStatus(),
+          isAttached: GM_cdp.isAttached()
+        };
+      `;
+
+      pageSandboxRunner(code, 'GM_cdp Script', 'gm-cdp-id', { grants: ['GM_cdp'] });
+
+      expect((window as any).__gmCdpProbe).toEqual({
+        isFn: true,
+        hasSend: true,
+        hasOn: true,
+        hasOff: true,
+        hasGetStatus: true,
+        status: { status: 'ATTACHED', conflict: false },
+        isAttached: true
+      });
+      delete (window as any).__gmCdpProbe;
+    });
+
+    it('T5.15: pageSandboxRunner GM_setValue and GM_deleteValue emit write-through window.postMessage', () => {
+      const posted: any[] = [];
+      const origPostMessage = window.postMessage;
+      window.postMessage = (msg: any) => {
+        posted.push(msg);
+      };
+
+      try {
+        const code = `
+          GM_setValue('theme', 'dark');
+          GM_setValue('count', 42);
+          GM_setValue('temp', undefined);
+          GM_deleteValue('theme');
+        `;
+
+        pageSandboxRunner(
+          code,
+          'GM Storage Write-through Script',
+          'gm-wt-script-1',
+          { grants: ['GM_setValue', 'GM_deleteValue'] },
+          'test-channel-token'
+        );
+
+        expect(posted).toHaveLength(4);
+
+        // 1. GM_setValue('theme', 'dark')
+        expect(posted[0]).toEqual({
+          source: 'xokj-userscript',
+          channelId: 'test-channel-token',
+          type: 'GM_STORAGE_SET',
+          scriptId: 'gm-wt-script-1',
+          key: 'theme',
+          value: 'dark'
+        });
+
+        // 2. GM_setValue('count', 42)
+        expect(posted[1]).toEqual({
+          source: 'xokj-userscript',
+          channelId: 'test-channel-token',
+          type: 'GM_STORAGE_SET',
+          scriptId: 'gm-wt-script-1',
+          key: 'count',
+          value: 42
+        });
+
+        // 3. GM_setValue('temp', undefined) -> emits GM_STORAGE_DELETE
+        expect(posted[2]).toEqual({
+          source: 'xokj-userscript',
+          channelId: 'test-channel-token',
+          type: 'GM_STORAGE_DELETE',
+          scriptId: 'gm-wt-script-1',
+          key: 'temp'
+        });
+
+        // 4. GM_deleteValue('theme')
+        expect(posted[3]).toEqual({
+          source: 'xokj-userscript',
+          channelId: 'test-channel-token',
+          type: 'GM_STORAGE_DELETE',
+          scriptId: 'gm-wt-script-1',
+          key: 'theme'
+        });
+      } finally {
+        window.postMessage = origPostMessage;
+      }
+    });
+
+    it('T5.16: pageSandboxRunner pre-hydrates initialValues and supports synchronous GM_getValue and GM_listValues', () => {
+      const initialValues = {
+        savedKey1: 'hello world',
+        savedKey2: { a: 1, b: 2 },
+        savedKey3: false
+      };
+
+      const code = `
+        window.__prehydrateProbe = {
+          v1: GM_getValue('savedKey1'),
+          v2: GM_getValue('savedKey2'),
+          v3: GM_getValue('savedKey3'),
+          vFallback: GM_getValue('missingKey', 'default-val'),
+          keys: GM_listValues()
+        };
+      `;
+
+      pageSandboxRunner(
+        code,
+        'Prehydrate Script',
+        'prehydrate-id',
+        { grants: ['GM_getValue', 'GM_listValues'] },
+        undefined,
+        initialValues
+      );
+
+      expect((window as any).__prehydrateProbe).toEqual({
+        v1: 'hello world',
+        v2: { a: 1, b: 2 },
+        v3: false,
+        vFallback: 'default-val',
+        keys: ['savedKey1', 'savedKey2', 'savedKey3']
+      });
+
+      delete (window as any).__prehydrateProbe;
+    });
+
+    it('T5.17: pageSandboxRunner pagehide teardown removes window listeners and drains pending requests', async () => {
+      let pendingPromise: Promise<any> | undefined;
+
+      const code = `
+        cdp.on('Network.requestWillBeSent', function() {
+          window.__shouldNotBeCalled = true;
+        });
+        window.__pendingPromise = cdp.send('Page.navigate', { url: 'https://example.com' });
+      `;
+
+      pageSandboxRunner(code, 'Teardown Script', 'teardown-id', { grants: ['cdp'] });
+      pendingPromise = (window as any).__pendingPromise;
+
+      const rejectSpy = vi.fn();
+      pendingPromise!.catch(rejectSpy);
+
+      // Trigger pagehide
+      window.dispatchEvent(new Event('pagehide'));
+
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(rejectSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ message: expect.stringContaining('page unloaded') })
+      );
+
+      // Subsequent event should not fire handler
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          source: window,
+          data: {
+            source: 'xokj-bridge',
+            type: 'CDP_RPC_EVENT',
+            method: 'Network.requestWillBeSent',
+            params: {}
+          }
+        })
+      );
+
+      expect((window as any).__shouldNotBeCalled).toBeUndefined();
+      delete (window as any).__pendingPromise;
+    });
   });
 
   // =========================================================================
@@ -1508,6 +1820,101 @@ var x = 123; // valid code`;
 
       // Fixed script should now successfully inject
       expect(injector.hasInjected(tabId, 0, 'syntax-err-script', 'document-start')).toBe(true);
+    });
+  });
+
+  describe('Tier 6: Pre-hydrated Userscript Storage & Sandbox Loading', () => {
+    it('T6.1: PrehydratedStorageLoader accurately identifies scripts with storage grants', () => {
+      const loader = new PrehydratedStorageLoader();
+
+      expect(loader.hasStorageGrants({ metadata: { grants: ['GM_getValue'] } } as any)).toBe(true);
+      expect(loader.hasStorageGrants({ metadata: { grants: ['GM_setValue'] } } as any)).toBe(true);
+      expect(loader.hasStorageGrants({ metadata: { grants: ['GM_deleteValue'] } } as any)).toBe(true);
+      expect(loader.hasStorageGrants({ metadata: { grants: ['GM_listValues'] } } as any)).toBe(true);
+      expect(loader.hasStorageGrants({ metadata: { grants: ['*'] } } as any)).toBe(true);
+      expect(loader.hasStorageGrants({ metadata: { grants: ['none', 'GM_getValue'] } } as any)).toBe(false);
+      expect(loader.hasStorageGrants({ metadata: { grants: ['GM_log', 'cdp'] } } as any)).toBe(false);
+      expect(loader.hasStorageGrants({ metadata: {} } as any)).toBe(false);
+    });
+
+    it('T6.2: PrehydratedStorageLoader loads storage snapshot from storage repo for granted scripts', async () => {
+      const loader = new PrehydratedStorageLoader();
+      await setGmValue('script-prehydrated', 'theme', 'dark');
+      await setGmValue('script-prehydrated', 'token', 12345);
+
+      const grantedScript = {
+        id: 'script-prehydrated',
+        name: 'Prehydrated Script',
+        metadata: { grants: ['GM_getValue'] }
+      } as any;
+
+      const ungrantedScript = {
+        id: 'script-ungranted',
+        name: 'Ungranted Script',
+        metadata: { grants: ['none'] }
+      } as any;
+
+      const snapshot = await loader.loadStorageSnapshot(grantedScript);
+      expect(snapshot).toEqual({ theme: 'dark', token: 12345 });
+
+      const emptySnapshot = await loader.loadStorageSnapshot(ungrantedScript);
+      expect(emptySnapshot).toBeUndefined();
+    });
+
+    it('T6.3: pageSandboxRunner initializes in-memory scriptStore from initialValues', () => {
+      let retrievedValue: unknown;
+      let listedKeys: string[] = [];
+
+      const code = `
+        window.retrievedValue = GM_getValue('persistedKey');
+        window.listedKeys = GM_listValues();
+      `;
+
+      (window as any).retrievedValue = undefined;
+      (window as any).listedKeys = undefined;
+
+      const result = pageSandboxRunner(
+        code,
+        'Storage Hydration Test',
+        'storage-hydrate-test',
+        { grants: ['GM_getValue', 'GM_listValues'] },
+        undefined,
+        { persistedKey: { nested: 'data', active: true }, count: 99 }
+      );
+
+      expect(result.success).toBe(true);
+      expect((window as any).retrievedValue).toEqual({ nested: 'data', active: true });
+      expect((window as any).listedKeys).toEqual(expect.arrayContaining(['persistedKey', 'count']));
+
+      delete (window as any).retrievedValue;
+      delete (window as any).listedKeys;
+    });
+
+    it('T6.4: executeScriptInTab supplies preloaded storage snapshot to chrome.scripting.executeScript', async () => {
+      await setGmValue('storage-wired-script', 'userPreference', 'compact');
+
+      const storageScript: ScriptRecord = {
+        id: 'storage-wired-script',
+        name: 'Storage Wired Script',
+        code: '// ==UserScript==\n// @name Storage Wired Script\n// @match https://example.com/*\n// @grant GM_getValue\n// ==/UserScript==',
+        metadata: {
+          name: 'Storage Wired Script',
+          matches: ['https://example.com/*'],
+          grants: ['GM_getValue'],
+          runAt: 'document-idle'
+        } as any,
+        enabled: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+
+      await injector.executeScriptInTab(42, 0, storageScript, 'document-idle');
+
+      expect(executedScripts.length).toBe(1);
+      const call = executedScripts[0];
+      expect(call.args[2]).toBe('storage-wired-script');
+      // The 6th argument is preloadedStorage
+      expect(call.args[5]).toEqual({ userPreference: 'compact' });
     });
   });
 });
