@@ -4,15 +4,13 @@
  * XOKJ Monorepo Unified Version Manager
  *
  * Usage:
- *   node scripts/bump-version.js [patch | minor | major | <explicit_version>] [options]
+ *   node scripts/bump-version.js <patch | minor | major | explicit_version> <--xokj | --xobrow> [options]
+ *   node scripts/bump-version.js <xokj | xobrow> <patch | minor | major | explicit_version> [options]
  *
  * Examples:
- *   npm run bump patch          # Bumps 0.2.0 -> 0.2.1 across monorepo
- *   npm run bump minor          # Bumps 0.2.0 -> 0.3.0 across monorepo
- *   npm run bump 1.0.0          # Sets version to 1.0.0
- *   npm run bump patch --xobrow # Bumps only packages/xobrow
- *   npm run bump patch --xokj   # Bumps only xokj extension
- *   npm run bump minor --tag    # Bumps and creates git commit + tag
+ *   npm run bump patch --xokj       # Bumps xokj extension (e.g. 0.3.0 -> 0.3.1)
+ *   npm run bump minor --xobrow     # Bumps xobrow CLI (e.g. 0.2.0 -> 0.3.0)
+ *   npm run bump patch --xokj --tag # Bumps xokj and creates git commit + tag
  */
 
 import fs from 'node:fs';
@@ -63,52 +61,98 @@ function updateJsonFile(filePath, updater) {
   fs.writeFileSync(filePath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
 }
 
+function printUsageAndExit(errorMessage, exitCode = 1) {
+  if (errorMessage) {
+    console.error(`\n❌ Error: ${errorMessage}\n`);
+  }
+  console.log('================================================================');
+  console.log('XOKJ Monorepo Version Manager — Usage Guide');
+  console.log('================================================================');
+  console.log('You must explicitly choose EITHER xokj OR xobrow to bump.');
+  console.log('Bumping both packages simultaneously is strictly forbidden.\n');
+  console.log('Usage:');
+  console.log('  npm run bump <patch|minor|major|version> <--xokj | --xobrow> [--tag]');
+  console.log('  npm run bump <xokj | xobrow> <patch|minor|major|version> [--tag]\n');
+  console.log('Examples:');
+  console.log('  npm run bump patch --xokj       # Bump xokj (extension)');
+  console.log('  npm run bump minor --xobrow     # Bump xobrow (CLI package)');
+  console.log('  npm run bump minor --xokj --tag # Bump xokj & create git commit/tag');
+  console.log('================================================================\n');
+  process.exit(exitCode);
+}
+
 function main() {
-  const args = process.argv.slice(2);
-  const target = args.find(arg => !arg.startsWith('--')) || 'patch';
-  const onlyXobrow = args.includes('--xobrow');
-  const onlyXokj = args.includes('--xokj');
-  const createTag = args.includes('--tag') || args.includes('--git');
+  const rawArgs = process.argv.slice(2);
+
+  if (rawArgs.length === 0 || rawArgs.includes('--help') || rawArgs.includes('-h')) {
+    printUsageAndExit(null, 0);
+  }
+
+  const isXokjFlag = rawArgs.includes('--xokj') || rawArgs.includes('xokj');
+  const isXobrowFlag = rawArgs.includes('--xobrow') || rawArgs.includes('xobrow');
+  const createTag = rawArgs.includes('--tag') || rawArgs.includes('--git');
+
+  if (!isXokjFlag && !isXobrowFlag) {
+    printUsageAndExit('Target package not specified. You must provide --xokj or --xobrow.');
+  }
+
+  if (isXokjFlag && isXobrowFlag) {
+    printUsageAndExit('Cannot bump both --xokj and --xobrow simultaneously. Please bump one component at a time.');
+  }
+
+  // Find the semver target (skip flag words and target words)
+  const nonFlags = rawArgs.filter(arg => !arg.startsWith('--') && arg !== 'xokj' && arg !== 'xobrow');
+  const target = nonFlags[0] || 'patch';
 
   const rootPkg = JSON.parse(fs.readFileSync(rootPkgPath, 'utf-8'));
   const xobrowPkg = JSON.parse(fs.readFileSync(xobrowPkgPath, 'utf-8'));
 
-  const changes = [];
+  let targetComponent = '';
+  let fromVer = '';
+  let toVer = '';
+  let tagVersion = '';
+  let filesToStage = [];
 
-  let newRootVer = rootPkg.version;
-  let newXobrowVer = xobrowPkg.version;
-
-  if (!onlyXobrow) {
-    newRootVer = incrementSemver(rootPkg.version, target);
+  if (isXokjFlag) {
+    targetComponent = 'xokj (Extension / Root)';
+    fromVer = rootPkg.version;
+    toVer = incrementSemver(rootPkg.version, target);
     updateJsonFile(rootPkgPath, pkg => {
-      pkg.version = newRootVer;
+      pkg.version = toVer;
     });
-    changes.push({ component: 'xokj (Extension / Root)', from: rootPkg.version, to: newRootVer });
+    tagVersion = `v${toVer}`;
+    filesToStage = ['package.json'];
+  } else {
+    targetComponent = 'xobrow (CLI Package)';
+    fromVer = xobrowPkg.version;
+    toVer = incrementSemver(xobrowPkg.version, target);
+    updateJsonFile(xobrowPkgPath, pkg => {
+      pkg.version = toVer;
+    });
+    tagVersion = `xobrow-v${toVer}`;
+    filesToStage = ['packages/xobrow/package.json'];
   }
 
-  if (!onlyXokj) {
-    newXobrowVer = incrementSemver(xobrowPkg.version, target);
-    updateJsonFile(xobrowPkgPath, pkg => {
-      pkg.version = newXobrowVer;
-    });
-    changes.push({ component: 'xobrow (CLI Package)', from: xobrowPkg.version, to: newXobrowVer });
+  // Sync package-lock.json
+  try {
+    execSync('npm install --package-lock-only', { cwd: rootDir, stdio: 'pipe' });
+    filesToStage.push('package-lock.json');
+  } catch {
+    // If lockfile update fails silently continue
   }
 
   console.log('================================================================');
   console.log('XOKJ Monorepo Version Manager');
   console.log('================================================================');
-  for (const c of changes) {
-    console.log(`- ${c.component.padEnd(28)} : ${c.from} -> ${c.to}`);
-  }
+  console.log(`- ${targetComponent.padEnd(28)} : ${fromVer} -> ${toVer}`);
   console.log('----------------------------------------------------------------');
-  console.log('Updated package.json files successfully.');
+  console.log(`Updated ${isXokjFlag ? 'package.json' : 'packages/xobrow/package.json'} and synchronized package-lock.json successfully.`);
 
   if (createTag) {
     try {
-      const tagVersion = `v${newRootVer}`;
-      execSync(`git add package.json packages/xobrow/package.json`, { cwd: rootDir, stdio: 'inherit' });
-      execSync(`git commit -m "chore(release): bump version to ${newRootVer}"`, { cwd: rootDir, stdio: 'inherit' });
-      execSync(`git tag ${tagVersion}`, { cwd: rootDir, stdio: 'inherit' });
+      execSync(`git add ${filesToStage.join(' ')}`, { cwd: rootDir, stdio: 'inherit' });
+      execSync(`git commit -m "chore(release): bump ${isXokjFlag ? 'xokj' : 'xobrow'} to ${toVer}"`, { cwd: rootDir, stdio: 'inherit' });
+      execSync(`git tag -a ${tagVersion} -m "Release ${tagVersion}"`, { cwd: rootDir, stdio: 'inherit' });
       console.log(`Created Git commit and tag: ${tagVersion}`);
       console.log(`Run: git push origin main --tags`);
     } catch (err) {
