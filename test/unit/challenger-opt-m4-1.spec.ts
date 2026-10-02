@@ -10,7 +10,7 @@
  * 5. Extension HTML & Manifest integrity: valid script and preload module references.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
@@ -20,6 +20,12 @@ describe('Empirical Challenger Opt-M4-1: Vite Packaging, ES2022 Target & CodeMir
   const distDir = path.join(rootDir, 'dist');
   const distAssetsDir = path.join(distDir, 'assets');
   const viteConfigContent = fs.readFileSync(path.join(rootDir, 'vite.config.ts'), 'utf8');
+
+  beforeAll(() => {
+    if (!fs.existsSync(distAssetsDir)) {
+      execSync('npm run build:fast', { cwd: rootDir, stdio: 'pipe' });
+    }
+  });
 
   // Helper to get all JS files in dist/assets
   function getJsChunks(): { name: string; fullPath: string; content: string; size: number }[] {

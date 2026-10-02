@@ -1,12 +1,20 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
+import { execSync } from 'node:child_process';
 
 describe('Milestone 4 Challenger 2: Font Asset Subsetting Empirical Verification', () => {
   const rootDir = process.cwd();
   const srcDir = path.join(rootDir, 'src');
   const distDir = path.join(rootDir, 'dist');
   const nodeModulesDir = path.join(rootDir, 'node_modules/@fortawesome/fontawesome-free');
+
+  beforeAll(() => {
+    const assetsDir = path.join(distDir, 'assets');
+    if (!fs.existsSync(assetsDir)) {
+      execSync('npm run build:fast', { cwd: rootDir, stdio: 'pipe' });
+    }
+  });
 
   // Helper to recursively find files
   function findFiles(dir: string, filter: (p: string) => boolean): string[] {

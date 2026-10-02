@@ -27,11 +27,14 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
-      - name: Run Test Verification
-        run: npm test
+      - name: Type Check
+        run: npm run type-check
 
       - name: Build Extension Production Bundle
         run: npm run build
+
+      - name: Run Test Verification
+        run: npm test
 
       - name: Resolve Release Version
         id: vars
