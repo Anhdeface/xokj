@@ -6,7 +6,8 @@
  * - GM_STORAGE_DELETE: deletes a userscript key via GmStorageRepository
  */
 
-import { gmStorageRepo, IGmStorageRepository } from '@/shared/storage';
+import { gmStorageRepo, IGmStorageRepository, getScript } from '@/shared/storage';
+import { matchesAny } from '@/shared/match-pattern';
 import type {
   GmStorageMessage,
   GmStorageSetMessage,
@@ -43,14 +44,14 @@ export class GmStorageMessageHandler {
 
   public handleMessage(
     message: any,
-    _sender: chrome.runtime.MessageSender,
+    sender: chrome.runtime.MessageSender,
     sendResponse: (response: GmStorageResponse) => void
   ): boolean | void {
     if (!message || (message.type !== 'GM_STORAGE_SET' && message.type !== 'GM_STORAGE_DELETE')) {
       return;
     }
 
-    this.processMessage(message as GmStorageMessage)
+    this.processMessage(message as GmStorageMessage, sender)
       .then((res) => sendResponse(res))
       .catch((err) =>
         sendResponse({
@@ -62,7 +63,10 @@ export class GmStorageMessageHandler {
     return true; // Keep channel open for async response
   }
 
-  public async processMessage(message: GmStorageMessage): Promise<GmStorageResponse> {
+  public async processMessage(
+    message: GmStorageMessage,
+    sender?: chrome.runtime.MessageSender
+  ): Promise<GmStorageResponse> {
     const { type, scriptId, key } = message;
 
     if (!scriptId || typeof scriptId !== 'string' || scriptId.trim() === '') {
@@ -74,6 +78,58 @@ export class GmStorageMessageHandler {
 
     const trimmedScriptId = scriptId.trim();
     const trimmedKey = key.trim();
+
+    // Sender boundary verification and grant enforcement
+    if (sender) {
+      const isInternalExtension =
+        !sender.tab &&
+        (!sender.url || (typeof chrome !== 'undefined' && chrome.runtime?.id && sender.id === chrome.runtime.id));
+
+      const isEmptySender = !sender.tab && !sender.url && !sender.id;
+
+      if (!isInternalExtension && !isEmptySender) {
+        const senderTabId = sender.tab?.id;
+        const senderUrl = sender.url || sender.tab?.url;
+        if (!senderTabId || !senderUrl) {
+          return { success: false, error: 'Unauthorized: Sender has no associated tab context' };
+        }
+
+        const script = await getScript(trimmedScriptId);
+        if (!script) {
+          return { success: false, error: `Script "${trimmedScriptId}" not found` };
+        }
+        if (!script.enabled) {
+          return { success: false, error: `Script "${trimmedScriptId}" is disabled` };
+        }
+
+        const grants = script.metadata?.grants || [];
+        if (grants.includes('none')) {
+          return { success: false, error: 'Script declared @grant none' };
+        }
+        const hasStorageGrant =
+          grants.includes('*') ||
+          (type === 'GM_STORAGE_SET' && grants.includes('GM_setValue')) ||
+          (type === 'GM_STORAGE_DELETE' && grants.includes('GM_deleteValue'));
+
+        if (!hasStorageGrant) {
+          return { success: false, error: `Script lacks grant for ${type}` };
+        }
+
+        if (script.metadata?.excludes?.length && matchesAny(script.metadata.excludes, senderUrl)) {
+          return { success: false, error: `Unauthorized: Sender URL "${senderUrl}" is excluded` };
+        }
+
+        const patterns =
+          script.metadata?.matches?.length
+            ? script.metadata.matches
+            : script.metadata?.matchPatterns?.length
+            ? script.metadata.matchPatterns
+            : script.metadata?.includes || [];
+        if (!matchesAny(patterns, senderUrl)) {
+          return { success: false, error: `Unauthorized: Sender URL "${senderUrl}" not matched` };
+        }
+      }
+    }
 
     try {
       if (type === 'GM_STORAGE_SET') {

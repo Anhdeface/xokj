@@ -31,7 +31,7 @@
     "@codemirror/view": "^6.36.4",
     "@fortawesome/fontawesome-free": "^7.3.1",
     "codemirror": "^6.0.1",
-    "vue": "3.5.13"
+    "vue": "^3.5.44"
   },
   "devDependencies": {
     "@crxjs/vite-plugin": "2.7.1",
@@ -39,9 +39,9 @@
     "@types/node": "^22.13.4",
     "@vitejs/plugin-vue": "^5.2.1",
     "@vue/test-utils": "^2.4.6",
-    "happy-dom": "^16.8.1",
+    "happy-dom": "^21.0.4",
     "typescript": "^5.7.3",
-    "vite": "5.4.14",
+    "vite": "^5.4.21",
     "vitest": "3.2.7",
     "vue-tsc": "^2.2.0"
   }

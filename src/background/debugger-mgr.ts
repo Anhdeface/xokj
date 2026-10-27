@@ -21,6 +21,7 @@ import {
   getScriptList,
   getSettings,
   saveTabSession,
+  getTabSessions,
   deleteTabSession,
   AsyncMutex,
   DEFAULT_SETTINGS,
@@ -131,6 +132,22 @@ export class TabDebuggerManager {
       if (chrome.storage?.onChanged) {
         chrome.storage.onChanged.addListener(this.storageOnChangedBound);
       }
+
+      // Rehydrate persisted tab sessions from storage on SW startup
+      try {
+        const persisted = await getTabSessions();
+        for (const [key, state] of Object.entries(persisted)) {
+          const tabId = Number(key);
+          if (!isNaN(tabId) && state) {
+            this.sessions.set(tabId, {
+              ...state,
+              activeDomains: new Set(state.activeDomains || []),
+              operationLock: null,
+              currentOp: null
+            });
+          }
+        }
+      } catch {}
 
       await this.reconcileTargets();
     }
@@ -921,12 +938,30 @@ export class TabDebuggerManager {
     if (typeof chrome === 'undefined' || !chrome.debugger?.getTargets) return;
     try {
       const targets = await chrome.debugger.getTargets();
-      const attachedTabIds = new Set(
-        targets.filter((t) => t.attached && typeof t.tabId === 'number').map((t) => t.tabId!)
+      const attachedTargets = new Map(
+        targets.filter((t) => t.attached && typeof t.tabId === 'number').map((t) => [t.tabId!, t])
       );
 
+      // Synchronize targets that are already attached in Chrome into this.sessions
+      for (const [tabId, target] of attachedTargets.entries()) {
+        let session = this.sessions.get(tabId);
+        if (!session) {
+          session = this.createSession(tabId);
+        }
+        if (session.status !== 'ATTACHED') {
+          session.status = 'ATTACHED';
+          session.attached = true;
+          session.conflictDetected = false;
+          session.conflictReason = undefined;
+          session.updatedAt = Date.now();
+          if (target.url) {
+            session.targetUrl = target.url;
+          }
+        }
+      }
+
       for (const [tabId, session] of this.sessions.entries()) {
-        if (session.status === 'ATTACHED' && !attachedTabIds.has(tabId)) {
+        if (session.status === 'ATTACHED' && !attachedTargets.has(tabId)) {
           session.status = 'DETACHED';
           session.attached = false;
           session.updatedAt = Date.now();

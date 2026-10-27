@@ -30,6 +30,18 @@ export function usePopupState() {
   const isReconnecting = ref<boolean>(false);
   const reconnectError = ref<string | null>(null);
   const reconnectSuccess = ref<boolean>(false);
+  const reconnectTimers = new Set<ReturnType<typeof setTimeout>>();
+  const pendingScriptToggles = new Map<string, boolean>();
+  let pendingGlobalToggle: boolean | null = null;
+
+  function scheduleReconnectSuccessReset(): void {
+    reconnectSuccess.value = true;
+    const timer = setTimeout(() => {
+      reconnectSuccess.value = false;
+      reconnectTimers.delete(timer);
+    }, 3000);
+    reconnectTimers.add(timer);
+  }
 
   function extractHostname(url: string): string {
     if (!url) return '';
@@ -140,10 +152,7 @@ export function usePopupState() {
 
         if (message.status === 'ATTACHED') {
           reconnectError.value = null;
-          reconnectSuccess.value = true;
-          setTimeout(() => {
-            reconnectSuccess.value = false;
-          }, 3000);
+          scheduleReconnectSuccessReset();
         }
       }
     }
@@ -156,14 +165,20 @@ export function usePopupState() {
     if (areaName !== 'local') return;
 
     if (changes.scripts) {
-      const newScripts = changes.scripts.newValue || {};
-      scripts.value = Object.values(newScripts);
+      const newScripts: Record<string, ScriptRecord> = changes.scripts.newValue || {};
+      scripts.value = Object.values(newScripts).map((s) => {
+        if (pendingScriptToggles.has(s.id)) {
+          return { ...s, enabled: pendingScriptToggles.get(s.id)! };
+        }
+        return s;
+      });
     }
 
     if (changes.settings) {
       const newSettings: AppSettings = changes.settings.newValue;
       if (newSettings && typeof newSettings.globalEnabled === 'boolean') {
-        globalEnabled.value = newSettings.globalEnabled;
+        globalEnabled.value =
+          pendingGlobalToggle !== null ? pendingGlobalToggle : newSettings.globalEnabled;
       }
     }
 
@@ -180,9 +195,17 @@ export function usePopupState() {
   async function toggleGlobal(enabled: boolean): Promise<void> {
     globalEnabled.value = enabled;
     if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-      chrome.runtime.sendMessage({ type: 'TOGGLE_GLOBAL', enabled }).catch(() => {});
+      pendingGlobalToggle = enabled;
+      try {
+        await chrome.runtime.sendMessage({ type: 'TOGGLE_GLOBAL', enabled });
+      } catch {} finally {
+        if (pendingGlobalToggle === enabled) {
+          pendingGlobalToggle = null;
+        }
+      }
+    } else {
+      await saveSettings({ globalEnabled: enabled });
     }
-    await saveSettings({ globalEnabled: enabled });
   }
 
   async function toggleScript(scriptId: string, enabled: boolean): Promise<void> {
@@ -191,9 +214,17 @@ export function usePopupState() {
       target.enabled = enabled;
     }
     if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-      chrome.runtime.sendMessage({ type: 'TOGGLE_SCRIPT', scriptId, enabled }).catch(() => {});
+      pendingScriptToggles.set(scriptId, enabled);
+      try {
+        await chrome.runtime.sendMessage({ type: 'TOGGLE_SCRIPT', scriptId, enabled });
+      } catch {} finally {
+        if (pendingScriptToggles.get(scriptId) === enabled) {
+          pendingScriptToggles.delete(scriptId);
+        }
+      }
+    } else {
+      await storageToggleScript(scriptId, enabled);
     }
-    await storageToggleScript(scriptId, enabled);
   }
 
   async function reconnectCdp(): Promise<void> {
@@ -216,14 +247,11 @@ export function usePopupState() {
         } else {
           cdpStatus.value = 'ATTACHED';
           conflictReason.value = undefined;
-          reconnectSuccess.value = true;
-          setTimeout(() => {
-            reconnectSuccess.value = false;
-          }, 3000);
+          scheduleReconnectSuccessReset();
         }
       } else {
         cdpStatus.value = 'ATTACHED';
-        reconnectSuccess.value = true;
+        scheduleReconnectSuccessReset();
       }
     } catch (err: any) {
       reconnectError.value = err?.message || 'Error communicating with background worker';
@@ -279,6 +307,9 @@ export function usePopupState() {
   });
 
   onUnmounted(() => {
+    reconnectTimers.forEach((timer) => clearTimeout(timer));
+    reconnectTimers.clear();
+
     if (typeof chrome !== 'undefined') {
       chrome.runtime?.onMessage?.removeListener(handleRuntimeMessage);
       chrome.storage?.onChanged?.removeListener(handleStorageChanged);

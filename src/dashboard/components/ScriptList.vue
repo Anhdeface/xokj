@@ -90,7 +90,6 @@ defineEmits<{
   (e: 'select', id: string): void;
   (e: 'toggle', id: string): void;
   (e: 'create'): void;
-  (e: 'delete', id: string): void;
 }>();
 </script>
 

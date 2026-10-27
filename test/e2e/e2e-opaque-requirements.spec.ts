@@ -38,7 +38,6 @@ import {
 } from '@/shared/storage';
 import { DevToolsConflictError } from '@/shared/types';
 import { scanFile } from '../../packages/xobrow/src/engine/scanner';
-import { defaultRegistry } from '../../packages/xobrow/src/rules/registry';
 
 describe('XOKJ Requirement-Driven Opaque-Box E2E Test Suite', () => {
   let context: ReturnType<typeof setupChromeMock>;

@@ -80,7 +80,13 @@ export function pageSandboxRunner(
           if (type === 'GM_STORAGE_SET') {
             payload.value = value;
           }
-          window.postMessage(payload, '*');
+          const targetOrigin =
+            typeof window !== 'undefined' &&
+            window.location?.origin &&
+            window.location.origin !== 'null'
+              ? window.location.origin
+              : '*';
+          window.postMessage(payload, targetOrigin);
         }
       } catch {
         // Safe ignore in restricted environments
@@ -353,7 +359,13 @@ export function pageSandboxRunner(
               rpcPayload.channelId = effectiveChannelId;
             }
 
-            window.postMessage(rpcPayload, '*');
+            const targetOrigin =
+              typeof window !== 'undefined' &&
+              window.location?.origin &&
+              window.location.origin !== 'null'
+                ? window.location.origin
+                : '*';
+            window.postMessage(rpcPayload, targetOrigin);
           });
 
           // Prevent unhandled rejection crashes if execution environment tears down before completion

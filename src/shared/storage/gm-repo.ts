@@ -97,6 +97,20 @@ export class GmStorageRepository implements IGmStorageRepository {
   }
 
   /**
+   * Instantiates a clean, prototype-free bucket (Object.create(null))
+   * ensuring keys never interact with or pollute Object.prototype.
+   */
+  private toCleanBucket(raw: unknown): Record<string, unknown> {
+    const bucket: Record<string, unknown> = Object.create(null);
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      for (const key of Object.getOwnPropertyNames(raw)) {
+        bucket[key] = deepClone((raw as any)[key]);
+      }
+    }
+    return bucket;
+  }
+
+  /**
    * Internal storage reader helper with environment fallback.
    */
   private async readBucket(scriptId: string): Promise<Record<string, unknown>> {
@@ -104,20 +118,17 @@ export class GmStorageRepository implements IGmStorageRepository {
 
     if (this.inMemoryOnly || typeof chrome === 'undefined' || !chrome.storage?.local) {
       const stored = this.inMemoryFallback.get(storageKey);
-      return stored ? deepClone(stored) : {};
+      return this.toCleanBucket(stored);
     }
 
     try {
       const result = await chrome.storage.local.get(storageKey);
       const raw = result[storageKey];
-      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-        return deepClone(raw as Record<string, unknown>);
-      }
-      return {};
+      return this.toCleanBucket(raw);
     } catch (err) {
       console.warn(`[GmStorageRepository] Failed to read storage for script "${scriptId}":`, err);
       const fallback = this.inMemoryFallback.get(storageKey);
-      return fallback ? deepClone(fallback) : {};
+      return this.toCleanBucket(fallback);
     }
   }
 
@@ -126,16 +137,16 @@ export class GmStorageRepository implements IGmStorageRepository {
    */
   private async writeBucket(scriptId: string, data: Record<string, unknown>): Promise<void> {
     const storageKey = getGmStorageKey(scriptId);
-    const cloned = deepClone(data);
+    const cleanBucket = this.toCleanBucket(data);
 
-    this.inMemoryFallback.set(storageKey, cloned);
+    this.inMemoryFallback.set(storageKey, cleanBucket);
 
     if (this.inMemoryOnly || typeof chrome === 'undefined' || !chrome.storage?.local) {
       return;
     }
 
     try {
-      await chrome.storage.local.set({ [storageKey]: cloned });
+      await chrome.storage.local.set({ [storageKey]: cleanBucket });
     } catch (err) {
       console.error(`[GmStorageRepository] Failed to write storage for script "${scriptId}":`, err);
       throw err;
@@ -297,7 +308,7 @@ export class GmStorageRepository implements IGmStorageRepository {
       for (const [key, value] of this.inMemoryFallback.entries()) {
         if (key.startsWith(GM_STORAGE_PREFIX)) {
           const scriptId = key.slice(GM_STORAGE_PREFIX.length);
-          result[scriptId] = deepClone(value);
+          result[scriptId] = this.toCleanBucket(value);
         }
       }
       return result;
@@ -309,7 +320,7 @@ export class GmStorageRepository implements IGmStorageRepository {
       for (const [key, value] of Object.entries(all)) {
         if (key.startsWith(GM_STORAGE_PREFIX) && value && typeof value === 'object' && !Array.isArray(value)) {
           const scriptId = key.slice(GM_STORAGE_PREFIX.length);
-          result[scriptId] = deepClone(value as Record<string, unknown>);
+          result[scriptId] = this.toCleanBucket(value as Record<string, unknown>);
         }
       }
       return result;

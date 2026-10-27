@@ -81,6 +81,7 @@ describe('Milestone 5: E2E Adversarial, Stress & Resilience Test Suite', () => {
   });
 
   afterEach(() => {
+    delete (Object.prototype as any).pollutedSecret;
     uiIpc.destroy();
     scriptInjector.destroy();
     conflictHandler.destroy();
@@ -618,82 +619,86 @@ describe('Milestone 5: E2E Adversarial, Stress & Resilience Test Suite', () => {
     });
 
     it('T4.3: Adversarial userscript runtime behavior (prototype pollution, exceptions, isolated GM storage) is contained by sandbox runner', async () => {
-      // 1. Prototype pollution attempt on Object.prototype
-      const pollutionScript = `
-        Object.prototype.pollutedSecret = 'EXPLOITED';
-        return typeof cdp;
-      `;
+      try {
+        // 1. Prototype pollution attempt on Object.prototype
+        const pollutionScript = `
+          Object.prototype.pollutedSecret = 'EXPLOITED';
+          return typeof cdp;
+        `;
 
-      const metadataGrantNone: ParsedMetadata = {
-        name: 'Polluter',
-        matches: ['*://*/*'],
-        matchPatterns: ['*://*/*'],
-        includes: [],
-        excludes: [],
-        runAt: 'document-idle',
-        grants: ['none'],
-        cdp: [],
-        cdpDeclarations: [],
-        cdpDomains: [],
-        requires: [],
-        resources: {},
-        noframes: false,
-        connects: [],
-        rawEntries: {}
-      };
+        const metadataGrantNone: ParsedMetadata = {
+          name: 'Polluter',
+          matches: ['*://*/*'],
+          matchPatterns: ['*://*/*'],
+          includes: [],
+          excludes: [],
+          runAt: 'document-idle',
+          grants: ['none'],
+          cdp: [],
+          cdpDeclarations: [],
+          cdpDomains: [],
+          requires: [],
+          resources: {},
+          noframes: false,
+          connects: [],
+          rawEntries: {}
+        };
 
-      const scriptNone: ScriptRecord = {
-        id: 'polluter-1',
-        name: 'Polluter',
-        code: pollutionScript,
-        enabled: true,
-        metadata: metadataGrantNone,
-        createdAt: Date.now(),
-        updatedAt: Date.now()
-      };
+        const scriptNone: ScriptRecord = {
+          id: 'polluter-1',
+          name: 'Polluter',
+          code: pollutionScript,
+          enabled: true,
+          metadata: metadataGrantNone,
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        };
 
-      const cdpClient = createCdpClient({ channelId: 'test-chan' });
-      const runnerNone = createSandboxRunner(scriptNone, buildSandboxScope(scriptNone, cdpClient));
-      const resultNone = runnerNone();
+        const cdpClient = createCdpClient({ channelId: 'test-chan' });
+        const runnerNone = createSandboxRunner(scriptNone, buildSandboxScope(scriptNone, cdpClient));
+        const resultNone = runnerNone();
 
-      // cdp must be undefined and shadowed
-      expect(resultNone).toBe('undefined');
+        // cdp must be undefined and shadowed
+        expect(resultNone).toBe('undefined');
 
-      // 2. Exception handling
-      const throwingScript = `
-        throw new Error('Explosion inside userscript');
-      `;
+        // 2. Exception handling
+        const throwingScript = `
+          throw new Error('Explosion inside userscript');
+        `;
 
-      const scriptThrower: ScriptRecord = {
-        id: 'thrower-1',
-        name: 'Thrower',
-        code: throwingScript,
-        enabled: true,
-        metadata: metadataGrantNone,
-        createdAt: Date.now(),
-        updatedAt: Date.now()
-      };
+        const scriptThrower: ScriptRecord = {
+          id: 'thrower-1',
+          name: 'Thrower',
+          code: throwingScript,
+          enabled: true,
+          metadata: metadataGrantNone,
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        };
 
-      const runnerThrower = createSandboxRunner(scriptThrower, buildSandboxScope(scriptThrower, cdpClient));
-      expect(() => runnerThrower()).toThrow(/Explosion inside userscript/);
+        const runnerThrower = createSandboxRunner(scriptThrower, buildSandboxScope(scriptThrower, cdpClient));
+        expect(() => runnerThrower()).toThrow(/Explosion inside userscript/);
 
-      // 3. Isolated GM storage does not leak to window or other scripts
-      const scriptA = { id: 'script-a', name: 'Script A', code: '', enabled: true } as ScriptRecord;
-      const scriptB = { id: 'script-b', name: 'Script B', code: '', enabled: true } as ScriptRecord;
+        // 3. Isolated GM storage does not leak to window or other scripts
+        const scriptA = { id: 'script-a', name: 'Script A', code: '', enabled: true } as ScriptRecord;
+        const scriptB = { id: 'script-b', name: 'Script B', code: '', enabled: true } as ScriptRecord;
 
-      const gmApi1 = createGmApi(scriptA, cdpClient);
-      const gmApi2 = createGmApi(scriptB, cdpClient);
+        const gmApi1 = createGmApi(scriptA, cdpClient);
+        const gmApi2 = createGmApi(scriptB, cdpClient);
 
-      (gmApi1.GM_setValue as Function)('token', 'SECRET_A');
-      (gmApi2.GM_setValue as Function)('token', 'SECRET_B');
+        (gmApi1.GM_setValue as Function)('token', 'SECRET_A');
+        (gmApi2.GM_setValue as Function)('token', 'SECRET_B');
 
-      expect((gmApi1.GM_getValue as Function)('token')).toBe('SECRET_A');
-      expect((gmApi2.GM_getValue as Function)('token')).toBe('SECRET_B');
-      expect((gmApi1.GM_listValues as Function)()).toEqual(['token']);
+        expect((gmApi1.GM_getValue as Function)('token')).toBe('SECRET_A');
+        expect((gmApi2.GM_getValue as Function)('token')).toBe('SECRET_B');
+        expect((gmApi1.GM_listValues as Function)()).toEqual(['token']);
 
-      (gmApi1.GM_deleteValue as Function)('token');
-      expect((gmApi1.GM_getValue as Function)('token')).toBeUndefined();
-      expect((gmApi2.GM_getValue as Function)('token')).toBe('SECRET_B');
+        (gmApi1.GM_deleteValue as Function)('token');
+        expect((gmApi1.GM_getValue as Function)('token')).toBeUndefined();
+        expect((gmApi2.GM_getValue as Function)('token')).toBe('SECRET_B');
+      } finally {
+        delete (Object.prototype as any).pollutedSecret;
+      }
     });
   });
 });

@@ -85,12 +85,19 @@ export class UiIpcServer {
         let session = typeof tabId === 'number' ? this.debuggerMgr.getSession(tabId) : undefined;
         if (!session && typeof tabId === 'number' && typeof chrome !== 'undefined' && chrome.storage?.local) {
           (async () => {
-            const stored = await chrome.storage.local.get('tab_sessions');
-            const s = stored.tab_sessions?.[tabId];
-            sendResponse({
-              status: s?.status ?? 'IDLE',
-              reason: s?.conflictReason
-            });
+            try {
+              const stored = await chrome.storage.local.get('tab_sessions');
+              const s = stored.tab_sessions?.[tabId];
+              sendResponse({
+                status: s?.status ?? 'IDLE',
+                reason: s?.conflictReason
+              });
+            } catch (err: any) {
+              sendResponse({
+                status: 'IDLE',
+                reason: err?.message || String(err)
+              });
+            }
           })();
           return true;
         }

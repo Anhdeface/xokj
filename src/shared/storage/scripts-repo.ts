@@ -9,6 +9,7 @@ import {
 } from './defaults';
 import { storageMutex } from './mutex';
 import { prepareScriptRecord } from './script-record';
+import { gmStorageRepo } from './gm-repo';
 
 /**
  * Internal helper to read scripts directly from storage without acquiring the mutex.
@@ -34,10 +35,10 @@ export async function getScripts(): Promise<Record<string, ScriptRecord>> {
   const scripts = await getStorageItem<Record<string, ScriptRecord>>(STORAGE_KEYS.SCRIPTS);
   if (scripts === undefined || scripts === null) {
     return storageMutex.runExclusive(async () => {
-      return getScriptsInternal();
+      return deepClone(await getScriptsInternal());
     });
   }
-  return scripts;
+  return deepClone(scripts);
 }
 
 /**
@@ -156,13 +157,17 @@ export async function deleteScript(id: string): Promise<void> {
     return;
   }
 
-  return storageMutex.runExclusive(async () => {
+  await storageMutex.runExclusive(async () => {
     const scripts = await getScriptsInternal();
     if (Object.prototype.hasOwnProperty.call(scripts, id)) {
       delete scripts[id];
       await setStorageItem(STORAGE_KEYS.SCRIPTS, scripts);
     }
   });
+
+  try {
+    await gmStorageRepo.clearGmValues(id);
+  } catch {}
 }
 
 /**

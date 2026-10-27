@@ -193,6 +193,9 @@ export class ScriptInjector {
 
     if (changeInfo.url && changeInfo.url !== this.guard.tabUrls.get(tabId)) {
       this.guard.handleUrlUpdate(tabId, changeInfo.url);
+      if (changeInfo.status !== 'complete') {
+        await this.processStage(tabId, 0, changeInfo.url, 'document-idle');
+      }
     }
 
     if (changeInfo.status === 'complete') {

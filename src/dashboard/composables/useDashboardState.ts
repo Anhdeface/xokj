@@ -72,13 +72,13 @@ export function useDashboardState() {
 
       if (searchQuery.value.trim()) {
         const q = searchQuery.value.toLowerCase().trim();
-        const matchName = script.name.toLowerCase().includes(q);
+        const matchName = (script.name || '').toLowerCase().includes(q);
         const matchDesc = (script.metadata?.description || '').toLowerCase().includes(q);
-        const matchCode = script.code.toLowerCase().includes(q);
-        const matchPattern = (script.metadata?.matches || []).some((m) =>
-          m.toLowerCase().includes(q)
+        const patterns = (script.metadata?.matches || []).concat(script.metadata?.matchPatterns || []);
+        const matchPattern = patterns.some(
+          (m) => typeof m === 'string' && m.toLowerCase().includes(q)
         );
-        if (!matchName && !matchDesc && !matchCode && !matchPattern) return false;
+        if (!matchName && !matchDesc && !matchPattern) return false;
       }
 
       return true;

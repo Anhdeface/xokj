@@ -18,7 +18,6 @@ defineOptions({
 defineProps<{
   metadata?: ParsedMetadata;
   parseErrors?: string[];
-  editable?: boolean;
 }>();
 </script>
 

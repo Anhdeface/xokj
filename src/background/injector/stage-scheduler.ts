@@ -6,7 +6,7 @@
  * and isolated execution in the target tab.
  */
 
-import type { ScriptRecord, RunAtTiming, AppSettings } from '@/shared/types';
+import { scriptRequiresCdp, type ScriptRecord, type RunAtTiming, type AppSettings } from '@/shared/types';
 import { matchesAny, isRestrictedUrl } from '@/shared/match-pattern';
 import { getScriptList, getSettings, onScriptsChanged } from '@/shared/storage';
 import type { TabDebuggerManager } from '../debugger-mgr';
@@ -151,7 +151,7 @@ export class StageScheduler {
 
     const allScripts = this.cachedScripts;
 
-    return allScripts.filter((script) => {
+    const matched = allScripts.filter((script) => {
       if (!script.enabled) return false;
 
       // Check timing tier
@@ -180,28 +180,21 @@ export class StageScheduler {
 
       return matchesAny(patterns, url);
     });
+
+    return matched.sort((a, b) => {
+      const timeDiff = (a.createdAt ?? 0) - (b.createdAt ?? 0);
+      if (timeDiff !== 0) return timeDiff;
+      const nameDiff = (a.name || '').localeCompare(b.name || '');
+      if (nameDiff !== 0) return nameDiff;
+      return (a.id || '').localeCompare(b.id || '');
+    });
   }
 
   /**
    * Checks whether scripts require CDP capabilities.
    */
   public hasCdpNeeds(scripts: ScriptRecord[]): boolean {
-    return scripts.some((s) => {
-      const grants = Array.isArray(s.metadata?.grants) ? s.metadata.grants : [];
-      if (grants.includes('none')) return false;
-
-      const hasCdpDirectives =
-        (Array.isArray(s.metadata?.cdpDeclarations) && s.metadata.cdpDeclarations.length > 0) ||
-        (Array.isArray(s.metadata?.cdp) && s.metadata.cdp.length > 0) ||
-        (Array.isArray(s.metadata?.cdpDomains) && s.metadata.cdpDomains.length > 0);
-
-      const hasCdpGrants =
-        grants.includes('GM_cdp') ||
-        grants.includes('cdp') ||
-        grants.includes('*');
-
-      return hasCdpDirectives || hasCdpGrants;
-    });
+    return scripts.some((s) => scriptRequiresCdp(s.enabled === undefined ? { ...s, enabled: true } : s));
   }
 
   /**

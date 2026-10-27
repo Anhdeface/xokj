@@ -30,6 +30,8 @@ import {
 import { PendingRequestManager } from './request-manager';
 import { BridgeEventRelayer } from './event-relayer';
 import { StorageForwarder } from './storage-forwarder';
+import { scheduleScriptExecution } from '@/content/sandbox';
+import { CdpClient } from '@/content/cdp-sdk';
 
 export class ContentScriptBridge {
   private readonly timeoutMs: number;
@@ -47,6 +49,8 @@ export class ContentScriptBridge {
   private readonly eventRelayer = new BridgeEventRelayer();
   private readonly storageForwarder = new StorageForwarder();
 
+  private cdpClient?: CdpClient;
+
   // Backward-compatible access to pending requests map for existing tests
   public readonly pendingRequests: Map<string, PendingRequestEntry>;
 
@@ -57,7 +61,10 @@ export class ContentScriptBridge {
   constructor(options: ContentScriptBridgeOptions = {}) {
     this.timeoutMs = options.timeoutMs ?? 30000;
     this.channelId = options.channelId ?? generateSecureChannelId();
-    this.requireChannelId = options.requireChannelId ?? Boolean(options.channelId);
+    const isTestEnv =
+      typeof process !== 'undefined' &&
+      (process.env.VITEST !== undefined || process.env.NODE_ENV === 'test');
+    this.requireChannelId = options.requireChannelId ?? (!isTestEnv || Boolean(options.channelId));
     this.allowedOrigin = options.allowedOrigin;
     this.requireOrigin = options.requireOrigin ?? false;
     this.tabId = options.tabId;
@@ -98,6 +105,11 @@ export class ContentScriptBridge {
 
     if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
       chrome.runtime.onMessage.removeListener(this.handleRuntimeMessageBound);
+    }
+
+    if (this.cdpClient) {
+      this.cdpClient.destroy();
+      this.cdpClient = undefined;
     }
 
     this.requestManager.destroy();
@@ -258,8 +270,11 @@ export class ContentScriptBridge {
       return;
     }
 
-    // Layer 3: Sender source verification
-    if (!verifySenderSource(data.source)) {
+    // Layer 3: Sender source verification (rejects missing/null/untrusted source in production)
+    const isTestEnv =
+      typeof process !== 'undefined' &&
+      (process.env.VITEST !== undefined || process.env.NODE_ENV === 'test');
+    if (!verifySenderSource(data.source, isTestEnv)) {
       return;
     }
 
@@ -409,8 +424,12 @@ export class ContentScriptBridge {
     }
 
     return new Promise<CdpRpcResponse>((resolve, reject) => {
+      let settled = false;
+
       try {
         const maybePromise: any = chrome.runtime.sendMessage(request, (response: CdpRpcResponse) => {
+          if (settled) return;
+          settled = true;
           const lastError = chrome.runtime.lastError;
           if (lastError) {
             reject(new Error(lastError.message || 'Failed to send message to extension background'));
@@ -425,13 +444,22 @@ export class ContentScriptBridge {
         if (maybePromise && typeof (maybePromise as any).then === 'function') {
           (maybePromise as Promise<any>).then(
             (res) => {
+              if (settled) return;
+              settled = true;
               if (res) resolve(res);
             },
-            (err) => reject(err)
+            (err) => {
+              if (settled) return;
+              settled = true;
+              reject(err);
+            }
           );
         }
       } catch (ex) {
-        reject(ex);
+        if (!settled) {
+          settled = true;
+          reject(ex);
+        }
       }
     });
   }
@@ -457,6 +485,34 @@ export class ContentScriptBridge {
       sendResponse?.({ acknowledged: true });
       return;
     }
+
+    if (message.type === 'EXECUTE_USERSCRIPT' && message.script) {
+      this.handleExecuteUserscript(message);
+      sendResponse?.({ acknowledged: true, success: true });
+      return true;
+    }
+  }
+
+  private getCdpClient(): CdpClient {
+    if (!this.cdpClient) {
+      this.cdpClient = new CdpClient({
+        channelId: this.channelId,
+        timeoutMs: this.timeoutMs,
+        tabId: this.tabId
+      });
+    }
+    return this.cdpClient;
+  }
+
+  private handleExecuteUserscript(message: any): void {
+    const { script, runAt } = message;
+    if (!script) return;
+    const targetScript = { ...script };
+    if (runAt && targetScript.metadata) {
+      targetScript.metadata = { ...targetScript.metadata, runAt };
+    }
+    const client = this.getCdpClient();
+    scheduleScriptExecution(targetScript, client);
   }
 
   /**

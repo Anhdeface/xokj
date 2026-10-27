@@ -81,10 +81,14 @@ export function verifyOrigin(
 
 /**
  * Layer 3: Sender source tag verification.
- * Validates that data.source is either omitted or explicitly 'xokj-userscript'.
+ * Validates that data.source is explicitly 'xokj-userscript'.
+ * Rejects undefined/null source from untrusted page scripts.
  */
-export function verifySenderSource(source: unknown): boolean {
-  return !source || source === 'xokj-userscript';
+export function verifySenderSource(source: unknown, allowUnspecified = false): boolean {
+  if (allowUnspecified && (source === undefined || source === null)) {
+    return true;
+  }
+  return source === 'xokj-userscript';
 }
 
 /**
@@ -106,7 +110,7 @@ export function verifyChannelId(
   if (expectedChannelId && messageChannelId) {
     return messageChannelId === expectedChannelId;
   }
-  return true;
+  return !requireChannelId;
 }
 
 /**

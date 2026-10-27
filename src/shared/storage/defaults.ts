@@ -260,12 +260,3 @@ export async function setStorageItem<T>(key: string, value: T): Promise<void> {
   await chrome.storage.local.set({ [key]: value });
 }
 
-/**
- * Internal helper to remove items from chrome.storage.local
- */
-export async function removeStorageItem(key: string | string[]): Promise<void> {
-  if (typeof chrome === 'undefined' || !chrome.storage?.local) {
-    return;
-  }
-  await chrome.storage.local.remove(key);
-}

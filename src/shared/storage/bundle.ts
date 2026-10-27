@@ -15,14 +15,19 @@ export interface ExportBundle {
 }
 
 /**
+ * Forbidden script keys that could cause prototype pollution or poisoning.
+ */
+export const FORBIDDEN_BUNDLE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
  * Exports userscripts as a formatted JSON string.
  */
 export async function exportScripts(scriptIds?: string[]): Promise<string> {
   const all = await getScriptList();
   const toExport =
     scriptIds && scriptIds.length > 0
-      ? all.filter((s) => scriptIds.includes(s.id))
-      : all;
+      ? all.filter((s) => scriptIds.includes(s.id) && !FORBIDDEN_BUNDLE_KEYS.has(s.id))
+      : all.filter((s) => !FORBIDDEN_BUNDLE_KEYS.has(s.id));
 
   const bundle: ExportBundle = {
     version: 1,
@@ -114,11 +119,12 @@ export async function importScripts(
           continue;
         }
 
-        const hasId = Boolean(raw.id && typeof raw.id === 'string' && raw.id !== '__proto__');
+        const isForbiddenId = typeof raw.id === 'string' && FORBIDDEN_BUNDLE_KEYS.has(raw.id);
+        const hasId = Boolean(raw.id && typeof raw.id === 'string' && !isForbiddenId);
         const exists = Boolean(hasId && Object.prototype.hasOwnProperty.call(scripts, raw.id));
 
         const itemToSave = { ...raw };
-        if (raw.id === '__proto__' || (exists && !options.overwrite)) {
+        if (!raw.id || isForbiddenId || (exists && !options.overwrite)) {
           itemToSave.id = undefined;
         }
 
@@ -136,7 +142,7 @@ export async function importScripts(
         if (!itemToSave.id) {
           while (
             Object.prototype.hasOwnProperty.call(scripts, saved.id) ||
-            saved.id === '__proto__'
+            FORBIDDEN_BUNDLE_KEYS.has(saved.id)
           ) {
             saved.id =
               typeof crypto !== 'undefined' && crypto.randomUUID

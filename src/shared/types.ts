@@ -181,33 +181,6 @@ export interface CdpRpcRequest {
 }
 
 /**
- * Window RPC Request sent from Userscript in Main World to ContentScriptBridge.
- */
-export interface CdpRpcWindowRequest {
-  source: 'xokj-userscript';
-  channelId: string;
-  type: 'CDP_RPC_REQUEST';
-  id: string;
-  method: string;
-  params?: Record<string, unknown>;
-  scriptId?: string;
-  tabId?: number;
-}
-
-/**
- * Window RPC Response sent from ContentScriptBridge to Userscript in Main World.
- */
-export interface CdpRpcWindowResponse {
-  source: 'xokj-bridge';
-  channelId: string;
-  type: 'CDP_RPC_RESPONSE';
-  id: string;
-  success: boolean;
-  result?: unknown;
-  error?: CdpRpcError;
-}
-
-/**
  * Error structure returned when a CDP RPC invocation fails.
  */
 export interface CdpRpcError {
@@ -305,15 +278,6 @@ export interface AttachOptions {
  * Payload broadcast for CDP session lifecycle changes conforming to PROJECT.md contracts.
  */
 export type CdpLifecyclePayload = CdpRpcLifecycleMessage;
-
-/**
- * DevTools conflict event description.
- */
-export interface ConflictEvent {
-  tabId: number;
-  reason: string;
-  timestamp: number;
-}
 
 // 5. Extension Storage Schema & Application Settings
 
@@ -417,22 +381,6 @@ export interface GmStorageResponse {
   success: boolean;
   error?: string;
 }
-
-/**
- * Union type representing all messages routed through chrome.runtime.
- */
-export type ExtensionMessage =
-  | GetActiveScriptsMessage
-  | ToggleScriptMessage
-  | ToggleGlobalMessage
-  | GetCdpStatusMessage
-  | ReconnectCdpMessage
-  | GetTabSessionMessage
-  | GmStorageMessage
-  | CdpRpcRequest
-  | CdpRpcResponse
-  | CdpRpcEventMessage
-  | CdpRpcLifecycleMessage;
 
 // 7. Userscript Runtime SDK Interface
 

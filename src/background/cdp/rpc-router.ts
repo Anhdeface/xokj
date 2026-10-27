@@ -104,19 +104,3 @@ export function formatInternalErrorResponse(id: string | undefined, err: any): C
   };
 }
 
-/**
- * Classifies an error thrown from chrome.debugger.sendCommand or attach.
- */
-export function classifyCdpCommandError(err: any): { isConflict: boolean; code: number; message: string } {
-  const errMsg = err?.message || String(err);
-  const isConflict =
-    err?.name === 'DevToolsConflictError' ||
-    /Another debugger is already attached|DevTools|attached to the tab|canceled_by_user/i.test(errMsg);
-
-  const code = isConflict ? 1001 : (err?.code ?? -32000);
-  const message = isConflict
-    ? 'DevTools conflict: native developer tools opened on tab'
-    : (err?.message || 'CDP command failed');
-
-  return { isConflict, code, message };
-}
